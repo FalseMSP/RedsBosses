@@ -1,0 +1,13 @@
+{
+  "itemGroup.redsbosses": "Example Mod Tab",
+  "block.redsbosses.example_block": "Example Block",
+  "item.redsbosses.example_item": "Example Item",
+
+  "redsbosses.configuration.title": "RedsBosses Configs",
+  "redsbosses.configuration.section.redsbosses.common.toml": "RedsBosses Configs",
+  "redsbosses.configuration.section.redsbosses.common.toml.title": "RedsBosses Configs",
+  "redsbosses.configuration.items": "Item List",
+  "redsbosses.configuration.logDirtBlock": "Log Dirt Block",
+  "redsbosses.configuration.magicNumberIntroduction": "Magic Number Text",
+  "redsbosses.configuration.magicNumber": "Magic Number"
+}
