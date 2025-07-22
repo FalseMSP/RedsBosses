@@ -16,7 +16,7 @@ public class ModEntities {
     public static final Supplier<EntityType<Radiance>> Radiance =
             ENTITY_TYPES.register("radiance", () ->
                     EntityType.Builder.of(Radiance::new, MobCategory.MONSTER)
-                            .sized(0.6f, 1.8f) // width, height
+                            .sized(1f, 4f) // width, height
                             .clientTrackingRange(8)
                             .updateInterval(3)
                             .build("radiance"));
