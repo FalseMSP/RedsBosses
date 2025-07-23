@@ -676,7 +676,7 @@ public class Radiance extends Monster {
 
     // Also update the slamPlayer method to add more dramatic particles when the slam hits
     private void slamPlayer(Player player) {
-        if (player.getAbilities().mayfly && !player.isSpectator() && !player.isCreative()) {
+        if (!player.isSpectator() && !player.isCreative()) {
             player.getAbilities().flying = false;
             player.onUpdateAbilities();
         }
