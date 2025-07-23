@@ -64,13 +64,13 @@ public class Radiance extends Monster {
     private static final int AIR_SLAM_THRESHOLD = 40; // 2 seconds at 20 ticks per second
     private static final double SLAM_RANGE = 128.0; // Range to detect and slam players
     private final Map<UUID, Integer> playerWarningTime = new HashMap<>();
-    private static final int WARNING_DURATION = 30; // 1.5 seconds warning before slam
-    private static final int UPDATED_AIR_SLAM_THRESHOLD = 40; // Increased to 2 seconds to account for warning
+    private static final int WARNING_DURATION = 10; // 0.5 seconds warning before slam
+    private static final int UPDATED_AIR_SLAM_THRESHOLD = 20; // Increased to 1 seconds to account for warning
 
     // Knockback Fields
     private int knockbackChargeTimer = 0;
     private static final int KNOCKBACK_WINDUP_TIME = 15; // 0.75 seconds windup before starting charge
-    private static final int KNOCKBACK_CHARGE_TIME = 10; // 0.5 seconds charge time
+    private static final int KNOCKBACK_CHARGE_TIME = 20; // 1 seconds charge time
     private static final int KNOCKBACK_COOLDOWN = 20*10; // 10 second cooldown between attacks
     private int knockbackCooldownTimer = 0;
     private static final double KNOCKBACK_RANGE = 9.0; // 9 blocks range
@@ -78,6 +78,18 @@ public class Radiance extends Monster {
     private static final double LAUNCH_STRENGTH = 15; // Vertical launch strength
     private boolean isChargingKnockback = false;
     private boolean isWindingUp = false;
+
+    // Giant Spear Attack Fields
+    private int spearAttackTimer = 0;
+    private static final int SPEAR_WARNING_TIME = 60; // 3 seconds warning
+    private static final int SPEAR_SPAWN_TIME = 20; // 1 second for spears to fully emerge
+    private static final int SPEAR_ATTACK_COOLDOWN = 20 * 15; // 15 second cooldown
+    private int spearAttackCooldown = 0;
+    private boolean isSpearAttackActive = false;
+    private final Map<BlockPos, Integer> spearPositions = new HashMap<>(); // Position -> height
+    private final Set<BlockPos> safeZones = new HashSet<>();
+    private static final int SPEAR_HEIGHT = 8; // How tall the spears are
+    private static final int SAFE_ZONE_RADIUS = 3; // Radius of safe zones around players
 
 
     public Radiance(EntityType<? extends Monster> entityType, Level level) {
@@ -89,7 +101,7 @@ public class Radiance extends Monster {
 
     public static AttributeSupplier.Builder createAttributes() {
         return Monster.createMonsterAttributes()
-                .add(Attributes.MAX_HEALTH, 200.0D) // Increased health for boss
+                .add(Attributes.MAX_HEALTH, 600.0D) // Increased health for boss
                 .add(Attributes.MOVEMENT_SPEED, 0.25D)
                 .add(Attributes.ATTACK_DAMAGE, 8.0D); // Increased damage for boss
     }
@@ -233,6 +245,9 @@ public class Radiance extends Monster {
 
             // if they are within 9 blocks, knock them back (then slam them into the ground xD)
             performKnockbackAttack();
+
+            // spear to bully people
+            performGiantSpearAttack();
         }
 
         // Break blocks within hitbox
@@ -240,6 +255,312 @@ public class Radiance extends Monster {
 
         // Update boss bar
         updateBossBar();
+    }
+
+    private void performGiantSpearAttack() {
+        // Handle cooldown
+        if (spearAttackCooldown > 0) {
+            spearAttackCooldown--;
+            return;
+        }
+
+        // Find all players in arena range
+        List<Player> playersInArena = this.level().getEntitiesOfClass(Player.class,
+                        new AABB(this.getX() - 50, this.getY() - 20, this.getZ() - 50,
+                                this.getX() + 50, this.getY() + 20, this.getZ() + 50))
+                .stream()
+                .filter(player -> !player.isCreative() && !player.isSpectator())
+                .collect(Collectors.toList());
+
+        if (playersInArena.isEmpty()) {
+            return;
+        }
+
+        // Start attack if not active
+        if (!isSpearAttackActive) {
+            startSpearAttack(playersInArena);
+            return;
+        }
+
+        // Handle active attack phases
+        spearAttackTimer++;
+
+        if (spearAttackTimer <= SPEAR_WARNING_TIME) {
+            // Warning phase - show where spears will spawn
+            showSpearWarnings();
+        } else if (spearAttackTimer <= SPEAR_WARNING_TIME + SPEAR_SPAWN_TIME) {
+            // Spawning phase - gradually build spears
+            spawnSpears();
+        } else {
+            // Attack finished - clean up and start cooldown
+            endSpearAttack();
+        }
+    }
+
+    private void startSpearAttack(List<Player> players) {
+        isSpearAttackActive = true;
+        spearAttackTimer = 0;
+        spearPositions.clear();
+        safeZones.clear();
+
+        // Play attack start sound
+        this.playSound(SoundEvents.WITHER_SPAWN, 1.5F, 0.8F);
+
+        // Announce attack to players
+        for (Player player : players) {
+            if (player instanceof ServerPlayer serverPlayer) {
+                serverPlayer.sendSystemMessage(Component.literal("§4The ground trembles with ancient power..."));
+            }
+        }
+
+        // Calculate safe zones around each player
+        for (Player player : players) {
+            BlockPos playerPos = player.blockPosition();
+
+            // Create safe zone around player
+            for (int x = -SAFE_ZONE_RADIUS; x <= SAFE_ZONE_RADIUS; x++) {
+                for (int z = -SAFE_ZONE_RADIUS; z <= SAFE_ZONE_RADIUS; z++) {
+                    if (x * x + z * z <= SAFE_ZONE_RADIUS * SAFE_ZONE_RADIUS) {
+                        BlockPos safePos = playerPos.offset(x, 0, z);
+                        safeZones.add(safePos);
+                    }
+                }
+            }
+        }
+
+        // Generate spear positions across the arena, avoiding safe zones
+        generateSpearPositions();
+    }
+
+    private void generateSpearPositions() {
+        // Define arena bounds (adjust based on your arena size)
+        int arenaRadius = 40;
+        BlockPos center = this.blockPosition();
+
+        // Generate spear positions in a pattern
+        for (int x = -arenaRadius; x <= arenaRadius; x += 3) { // Every 3 blocks
+            for (int z = -arenaRadius; z <= arenaRadius; z += 3) {
+                BlockPos spearPos = center.offset(x, 0, z);
+
+                // Skip if in safe zone
+                if (safeZones.contains(spearPos)) {
+                    continue;
+                }
+
+                // Skip if too close to safe zones (ensure 10 block safety as requested)
+                boolean tooCloseToSafeZone = false;
+                for (BlockPos safeZone : safeZones) {
+                    double distance = Math.sqrt(spearPos.distSqr(safeZone));
+                    if (distance < 5) { // 5 block buffer around safe zones
+                        tooCloseToSafeZone = true;
+                        break;
+                    }
+                }
+
+                if (!tooCloseToSafeZone) {
+                    // Add some randomness to make it less predictable
+                    if (Math.random() < 0.7) { // 70% chance to spawn spear at this position
+                        // Find ground level
+                        BlockPos groundPos = findGroundLevel(spearPos);
+                        if (groundPos != null) {
+                            spearPositions.put(groundPos, 0); // Start at height 0
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private BlockPos findGroundLevel(BlockPos pos) {
+        // Search down from current Y level to find solid ground
+        for (int y = (int) this.getY() + 10; y >= (int) this.getY() - 20; y--) {
+            BlockPos checkPos = new BlockPos(pos.getX(), y, pos.getZ());
+            BlockState blockState = this.level().getBlockState(checkPos);
+
+            if (!blockState.isAir() && blockState.isSolid()) {
+                return checkPos.above(); // Return position above the solid block
+            }
+        }
+        return null; // No solid ground found
+    }
+
+    private void showSpearWarnings() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        float warningProgress = (float) spearAttackTimer / SPEAR_WARNING_TIME;
+
+        // Show warning particles at spear positions
+        for (BlockPos spearPos : spearPositions.keySet()) {
+            // Intensity increases as warning progresses
+            SimpleParticleType particleType = warningProgress > 0.8f ? ParticleTypes.SOUL_FIRE_FLAME :
+                    warningProgress > 0.5f ? ParticleTypes.FLAME :
+                            ParticleTypes.SMOKE;
+
+            // Create warning pillar
+            for (int i = 0; i < SPEAR_HEIGHT; i++) {
+                if (Math.random() < warningProgress) { // More particles as warning progresses
+                    serverLevel.sendParticles(particleType,
+                            spearPos.getX() + 0.5, spearPos.getY() + i, spearPos.getZ() + 0.5,
+                            1, 0.2, 0, 0.2, 0.02);
+                }
+            }
+        }
+
+        // Show safe zone indicators
+//        if (spearAttackTimer % 10 == 0) { // Every 0.5 seconds
+//            for (BlockPos safePos : safeZones) {
+//                serverLevel.sendParticles(ParticleTypes.HAPPY_VILLAGER,
+//                        safePos.getX() + 0.5, safePos.getY() + 0.1, safePos.getZ() + 0.5,
+//                        1, 0, 0, 0, 0);
+//            }
+//        }
+
+        // Play warning sounds
+        if (spearAttackTimer % 20 == 0) { // Every second
+            float pitch = 0.5f + (warningProgress * 0.5f);
+            this.playSound(SoundEvents.NOTE_BLOCK_BASS.value(), 1.0f, pitch);
+        }
+
+        // Final warning
+        if (warningProgress > 0.9f && spearAttackTimer % 5 == 0) {
+            this.playSound(SoundEvents.NOTE_BLOCK_PLING.value(), 1.5f, 2.0f);
+        }
+    }
+
+    private void spawnSpears() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        float spawnProgress = (float) (spearAttackTimer - SPEAR_WARNING_TIME) / SPEAR_SPAWN_TIME;
+
+        // Update spear heights
+        for (Map.Entry<BlockPos, Integer> entry : spearPositions.entrySet()) {
+            BlockPos pos = entry.getKey();
+            int currentHeight = entry.getValue();
+            int targetHeight = (int) (SPEAR_HEIGHT * spawnProgress);
+
+            if (currentHeight < targetHeight) {
+                // Spawn spear blocks
+                for (int h = currentHeight; h < targetHeight && h < SPEAR_HEIGHT; h++) {
+                    BlockPos spearBlockPos = pos.above(h);
+
+                    // Use different blocks for different parts of the spear
+                    BlockState spearBlock;
+                    if (h == targetHeight - 1) {
+                        spearBlock = Blocks.POINTED_DRIPSTONE.defaultBlockState(); // Sharp tip
+                    } else {
+                        spearBlock = Blocks.DRIPSTONE_BLOCK.defaultBlockState(); // Body
+                    }
+
+                    this.level().setBlock(spearBlockPos, spearBlock, 3);
+
+                    // Spawn particles when block appears
+                    serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                            spearBlockPos.getX() + 0.5, spearBlockPos.getY(), spearBlockPos.getZ() + 0.5,
+                            3, 0.3, 0.1, 0.3, 0.1);
+                }
+
+                entry.setValue(targetHeight);
+            }
+        }
+
+        // Check for player damage
+        checkSpearDamage();
+
+        // Play emerging sound
+        if (spearAttackTimer % 3 == 0) {
+            this.playSound(SoundEvents.DRIPSTONE_BLOCK_PLACE, 2.0F, 0.7F);
+        }
+    }
+
+    private void checkSpearDamage() {
+        // Find players that might be hit by spears
+        for (Player player : this.level().getEntitiesOfClass(Player.class,
+                new AABB(this.getX() - 50, this.getY() - 20, this.getZ() - 50,
+                        this.getX() + 50, this.getY() + 20, this.getZ() + 50))) {
+
+            if (player.isCreative() || player.isSpectator()) continue;
+
+            BlockPos playerPos = player.blockPosition();
+
+            // Check if player is standing on or inside a spear
+            if (spearPositions.containsKey(playerPos) ||
+                    spearPositions.containsKey(playerPos.below()) ||
+                    spearPositions.containsKey(playerPos.above())) {
+
+                // Deal significant damage
+                float damage = 12.0F; // High damage for standing in spears
+                player.hurt(this.damageSources().mobAttack(this), damage);
+
+                // Knockback player away from spear
+                Vec3 knockback = new Vec3(
+                        (Math.random() - 0.5) * 2.0,
+                        SPEAR_HEIGHT*1.5,
+                        (Math.random() - 0.5) * 2.0
+                );
+                player.setDeltaMovement(knockback);
+                player.hurtMarked = true;
+
+                // Play damage sound
+                player.playSound(SoundEvents.PLAYER_HURT, 1.0F, 1.0F);
+
+                // Add brief weakness effect
+                player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, 60, 1));
+            }
+        }
+    }
+
+    private void endSpearAttack() {
+        isSpearAttackActive = false;
+        spearAttackTimer = 0;
+        spearAttackCooldown = SPEAR_ATTACK_COOLDOWN;
+
+        // Schedule spear removal after a delay
+        scheduleSpearRemoval();
+
+        // Play attack end sound
+        this.playSound(SoundEvents.WITHER_DEATH, 1.0F, 1.2F);
+
+        // Clear collections
+        safeZones.clear();
+    }
+
+    private void scheduleSpearRemoval() {
+        // Remove spears after 5 seconds (100 ticks)
+        if (this.level() instanceof ServerLevel serverLevel) {
+            serverLevel.getServer().execute(() -> {
+                // Schedule removal for later
+                new Timer().schedule(new TimerTask() {
+                    @Override
+                    public void run() {
+                        removeSpears();
+                    }
+                }, 5000); // 5 seconds delay
+            });
+        }
+    }
+
+    private void removeSpears() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Remove all spear blocks
+        for (BlockPos spearBase : spearPositions.keySet()) {
+            for (int h = 0; h < SPEAR_HEIGHT; h++) {
+                BlockPos spearBlockPos = spearBase.above(h);
+                BlockState currentState = this.level().getBlockState(spearBlockPos);
+
+                if (currentState.is(Blocks.POINTED_DRIPSTONE) || currentState.is(Blocks.DRIPSTONE_BLOCK)) {
+                    this.level().setBlock(spearBlockPos, Blocks.AIR.defaultBlockState(), 3);
+
+                    // Spawn particles when removing
+                    serverLevel.sendParticles(ParticleTypes.LARGE_SMOKE,
+                            spearBlockPos.getX() + 0.5, spearBlockPos.getY(), spearBlockPos.getZ() + 0.5,
+                            2, 0.2, 0.1, 0.2, 0.05);
+                }
+            }
+        }
+
+        spearPositions.clear();
+        this.playSound(SoundEvents.DRIPSTONE_BLOCK_BREAK, 1.5F, 0.8F);
     }
 
     // Replace your performAirSlamAttack method with this enhanced version
@@ -297,7 +618,7 @@ public class Radiance extends Monster {
         double handZ = player.getZ();
 
         // Create the visual hand using particles
-        createHandParticles(serverLevel, handX, handY, handZ, intensity);
+        createWarningParticles(serverLevel, handX, handY, handZ, intensity);
 
         // Play warning sound with increasing pitch
         if (warningTime % 10 == 0) { // Every 0.5 seconds
@@ -318,96 +639,11 @@ public class Radiance extends Monster {
         }
     }
 
-    // Add this method to create hand-shaped particle effects
-    private void createHandParticles(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
-//        // Hand palm (rectangular base)
-//        createHandPalm(serverLevel, centerX, centerY, centerZ, intensity);
-//
-//        // Fingers
-//        createFingers(serverLevel, centerX, centerY, centerZ, intensity);
-//
-//        // Thumb
-//        createThumb(serverLevel, centerX, centerY, centerZ, intensity);
+    // Add this method to create warning particle effects (HAND ATTACK)
+    private void createWarningParticles(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
 
         // Add glowing aura around the hand
         createHandAura(serverLevel, centerX, centerY, centerZ, intensity);
-    }
-
-    private void createHandPalm(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
-        // Create a rectangular palm shape
-        for (double x = -1.5; x <= 1.5; x += 0.3) {
-            for (double z = -1.0; z <= 1.5; z += 0.3) {
-                for (double y = -0.3; y <= 0.3; y += 0.3) {
-                    // Add some randomness to make it look more organic
-                    double offsetX = x + (Math.random() - 0.5) * 0.2;
-                    double offsetY = y + (Math.random() - 0.5) * 0.1;
-                    double offsetZ = z + (Math.random() - 0.5) * 0.2;
-
-                    // Use different particles based on intensity
-                    SimpleParticleType particleType = intensity > 0.7f ? ParticleTypes.FLAME :
-                            intensity > 0.4f ? ParticleTypes.SMOKE : ParticleTypes.CLOUD;
-
-                    serverLevel.sendParticles(particleType,
-                            centerX + offsetX, centerY + offsetY, centerZ + offsetZ,
-                            1, 0, 0, 0, 0);
-                }
-            }
-        }
-    }
-
-    private void createFingers(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
-        // Create 4 fingers
-        for (int finger = 0; finger < 4; finger++) {
-            double fingerX = -1.2 + (finger * 0.8); // Spread fingers across palm
-
-            // Each finger has 3 segments
-            for (int segment = 0; segment < 3; segment++) {
-                double segmentZ = 1.5 + (segment * 0.8); // Extend forward from palm
-                double segmentY = -segment * 0.2; // Slight downward curve
-
-                // Finger width decreases towards tip
-                double width = 0.3 - (segment * 0.1);
-
-                for (double w = -width; w <= width; w += 0.2) {
-                    double offsetX = fingerX + w + (Math.random() - 0.5) * 0.1;
-                    double offsetY = segmentY + (Math.random() - 0.5) * 0.1;
-                    double offsetZ = segmentZ + (Math.random() - 0.5) * 0.1;
-
-                    SimpleParticleType particleType = intensity > 0.7f ? ParticleTypes.SOUL_FIRE_FLAME :
-                            intensity > 0.4f ? ParticleTypes.LARGE_SMOKE : ParticleTypes.CLOUD;
-
-                    serverLevel.sendParticles(particleType,
-                            centerX + offsetX, centerY + offsetY, centerZ + offsetZ,
-                            1, 0, 0, 0, 0);
-                }
-            }
-        }
-    }
-
-    private void createThumb(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
-        // Create thumb on the side
-        for (int segment = 0; segment < 2; segment++) {
-            double thumbX = -2.0 - (segment * 0.5); // Extend to the side
-            double thumbZ = 0.5 + (segment * 0.3);
-            double thumbY = -segment * 0.1;
-
-            double width = 0.4 - (segment * 0.1);
-
-            for (double w = -width; w <= width; w += 0.2) {
-                for (double h = -width; h <= width; h += 0.2) {
-                    double offsetX = thumbX + (Math.random() - 0.5) * 0.1;
-                    double offsetY = thumbY + h + (Math.random() - 0.5) * 0.1;
-                    double offsetZ = thumbZ + w + (Math.random() - 0.5) * 0.1;
-
-                    SimpleParticleType particleType = intensity > 0.7f ? ParticleTypes.SOUL_FIRE_FLAME :
-                            intensity > 0.4f ? ParticleTypes.LARGE_SMOKE : ParticleTypes.CLOUD;
-
-                    serverLevel.sendParticles(particleType,
-                            centerX + offsetX, centerY + offsetY, centerZ + offsetZ,
-                            1, 0, 0, 0, 0);
-                }
-            }
-        }
     }
 
     private void createHandAura(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
@@ -660,6 +896,9 @@ public class Radiance extends Monster {
         tag.putInt("KnockbackCooldownTimer", this.knockbackCooldownTimer);
         tag.putBoolean("IsChargingKnockback", this.isChargingKnockback);
         tag.putBoolean("IsWindingUp", this.isWindingUp);
+        tag.putInt("SpearAttackTimer", this.spearAttackTimer);
+        tag.putInt("SpearAttackCooldown", this.spearAttackCooldown);
+        tag.putBoolean("IsSpearAttackActive", this.isSpearAttackActive);
     }
 
     // Update the readAdditionalSaveData method to load the new fields:
@@ -686,6 +925,15 @@ public class Radiance extends Monster {
         }
         if (tag.contains("IsWindingUp")) {
             this.isWindingUp = tag.getBoolean("IsWindingUp");
+        }
+        if (tag.contains("SpearAttackTimer")) {
+            this.spearAttackTimer = tag.getInt("SpearAttackTimer");
+        }
+        if (tag.contains("SpearAttackCooldown")) {
+            this.spearAttackCooldown = tag.getInt("SpearAttackCooldown");
+        }
+        if (tag.contains("IsSpearAttackActive")) {
+            this.isSpearAttackActive = tag.getBoolean("IsSpearAttackActive");
         }
     }
 
@@ -736,13 +984,6 @@ public class Radiance extends Monster {
 
                 // Play charge start sound
                 this.playSound(SoundEvents.BEACON_POWER_SELECT, 1.0F, 0.8F);
-
-                // Notify players that charge has started
-                for (Player player : playersInRange) {
-                    if (player instanceof ServerPlayer serverPlayer) {
-                        serverPlayer.sendSystemMessage(Component.literal("§6The Radiance begins to glow with power..."));
-                    }
-                }
             }
             return;
         }
@@ -851,10 +1092,6 @@ public class Radiance extends Monster {
                     serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
                             player.getX(), player.getY() + 2.5, player.getZ(),
                             3, 0.5, 0.3, 0.5, 0);
-
-                    if (player instanceof ServerPlayer serverPlayer && knockbackChargeTimer % 20 == 0) {
-                        serverPlayer.sendSystemMessage(Component.literal("§4INCOMING KNOCKBACK!"));
-                    }
                 } else {
                     // Moderate warning
                     serverLevel.sendParticles(ParticleTypes.CRIT,
@@ -928,13 +1165,6 @@ public class Radiance extends Monster {
 
         // Play individual player sounds
         player.playSound(SoundEvents.PLAYER_ATTACK_KNOCKBACK, 1.5F, 0.7F);
-
-        // Send message to player
-        if (player instanceof ServerPlayer serverPlayer) {
-            String intensityMessage = distanceMultiplier > 0.8 ? "§4violently repels" :
-                    distanceMultiplier > 0.5 ? "§crejects" : "§epushes away";
-            serverPlayer.sendSystemMessage(Component.literal("§6The Radiance " + intensityMessage + " you!"));
-        }
     }
 
     // Add this method to create the shockwave visual effect
