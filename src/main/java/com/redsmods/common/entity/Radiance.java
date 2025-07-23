@@ -2,9 +2,12 @@ package com.redsmods.common.entity;
 
 import com.redsmods.common.SpiralStructureBuilder;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.core.particles.SimpleParticleType;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerBossEvent;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
@@ -13,6 +16,8 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
@@ -27,10 +32,8 @@ import net.minecraft.world.level.material.PushReaction;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
+import java.util.stream.Collectors;
 
 enum PHASE {
     DEACTIVATED_IDOL,
@@ -56,10 +59,26 @@ public class Radiance extends Monster {
             BossEvent.BossBarOverlay.PROGRESS
     );
 
-    // Air slam attack tracking
+    // Air slam attack Fields
     private final Map<UUID, Integer> playerAirTime = new HashMap<>();
     private static final int AIR_SLAM_THRESHOLD = 40; // 2 seconds at 20 ticks per second
     private static final double SLAM_RANGE = 128.0; // Range to detect and slam players
+    private final Map<UUID, Integer> playerWarningTime = new HashMap<>();
+    private static final int WARNING_DURATION = 30; // 1.5 seconds warning before slam
+    private static final int UPDATED_AIR_SLAM_THRESHOLD = 40; // Increased to 2 seconds to account for warning
+
+    // Knockback Fields
+    private int knockbackChargeTimer = 0;
+    private static final int KNOCKBACK_WINDUP_TIME = 15; // 0.75 seconds windup before starting charge
+    private static final int KNOCKBACK_CHARGE_TIME = 10; // 0.5 seconds charge time
+    private static final int KNOCKBACK_COOLDOWN = 20*10; // 10 second cooldown between attacks
+    private int knockbackCooldownTimer = 0;
+    private static final double KNOCKBACK_RANGE = 9.0; // 9 blocks range
+    private static final double KNOCKBACK_STRENGTH = 15.0; // Horizontal knockback strength
+    private static final double LAUNCH_STRENGTH = 15; // Vertical launch strength
+    private boolean isChargingKnockback = false;
+    private boolean isWindingUp = false;
+
 
     public Radiance(EntityType<? extends Monster> entityType, Level level) {
         super(entityType, level);
@@ -209,8 +228,11 @@ public class Radiance extends Monster {
             }
             this.moveTo(this.getX(), groundY, this.getZ());
         } else if (this.state == PHASE.ACTIVATED_IDOL) {
-            // different phases.
+            // if they are in the air, slam them onto the ground
             performAirSlamAttack();
+
+            // if they are within 9 blocks, knock them back (then slam them into the ground xD)
+            performKnockbackAttack();
         }
 
         // Break blocks within hitbox
@@ -220,48 +242,337 @@ public class Radiance extends Monster {
         updateBossBar();
     }
 
+    // Replace your performAirSlamAttack method with this enhanced version
     private void performAirSlamAttack() {
         // Find all players within range
         for (Player player : this.level().getEntitiesOfClass(Player.class,
                 new AABB(this.getX() - SLAM_RANGE, this.getY() - SLAM_RANGE, this.getZ() - SLAM_RANGE,
                         this.getX() + SLAM_RANGE, this.getY() + SLAM_RANGE, this.getZ() + SLAM_RANGE))) {
 
+            if (player.isCreative())
+                continue;
+
             UUID playerId = player.getUUID();
 
             // Check if player is on ground
             if (player.onGround()) {
-                // Reset air time if on ground
+                // Reset air time and warning time if on ground
                 playerAirTime.remove(playerId);
+                playerWarningTime.remove(playerId);
             } else {
                 // Increment air time
                 int currentAirTime = playerAirTime.getOrDefault(playerId, 0);
                 currentAirTime++;
                 playerAirTime.put(playerId, currentAirTime);
 
-                // Check if player has been in air too long
-                if (currentAirTime >= AIR_SLAM_THRESHOLD) {
+                // Start warning phase when approaching threshold
+                if (currentAirTime >= AIR_SLAM_THRESHOLD - WARNING_DURATION && currentAirTime < UPDATED_AIR_SLAM_THRESHOLD) {
+                    int warningTime = playerWarningTime.getOrDefault(playerId, 0);
+                    warningTime++;
+                    playerWarningTime.put(playerId, warningTime);
+
+                    // Show visual warning indicator
+                    showSlamWarning(player, warningTime);
+
+                } else if (currentAirTime >= UPDATED_AIR_SLAM_THRESHOLD) {
+                    // Execute the slam
                     slamPlayer(player);
-                    playerAirTime.remove(playerId); // Reset after slam
+                    playerAirTime.remove(playerId);
+                    playerWarningTime.remove(playerId);
                 }
             }
         }
     }
 
+    // Add this new method to show the visual warning
+    private void showSlamWarning(Player player, int warningTime) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Calculate warning intensity (0.0 to 1.0)
+        float intensity = (float) warningTime / WARNING_DURATION;
+
+        // Position the hand above the player
+        double handX = player.getX();
+        double handY = player.getY() + 8.0 + Math.sin(warningTime * 0.3) * 0.5; // Slight bobbing motion
+        double handZ = player.getZ();
+
+        // Create the visual hand using particles
+        createHandParticles(serverLevel, handX, handY, handZ, intensity);
+
+        // Play warning sound with increasing pitch
+        if (warningTime % 10 == 0) { // Every 0.5 seconds
+            float pitch = 0.8f + (intensity * 0.4f); // Pitch increases from 0.8 to 1.2
+            player.playSound(SoundEvents.BEACON_POWER_SELECT, 0.3f + intensity * 0.4f, pitch);
+        }
+
+        // Add screen shake effect using particles around player's view
+        if (intensity > 0.5f) {
+            for (int i = 0; i < 3; i++) {
+                double offsetX = (Math.random() - 0.5) * 0.5;
+                double offsetY = (Math.random() - 0.5) * 0.5;
+                double offsetZ = (Math.random() - 0.5) * 0.5;
+                serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
+                        player.getX() + offsetX, player.getY() + 2 + offsetY, player.getZ() + offsetZ,
+                        1, 0, 0, 0, 0);
+            }
+        }
+    }
+
+    // Add this method to create hand-shaped particle effects
+    private void createHandParticles(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
+//        // Hand palm (rectangular base)
+//        createHandPalm(serverLevel, centerX, centerY, centerZ, intensity);
+//
+//        // Fingers
+//        createFingers(serverLevel, centerX, centerY, centerZ, intensity);
+//
+//        // Thumb
+//        createThumb(serverLevel, centerX, centerY, centerZ, intensity);
+
+        // Add glowing aura around the hand
+        createHandAura(serverLevel, centerX, centerY, centerZ, intensity);
+    }
+
+    private void createHandPalm(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
+        // Create a rectangular palm shape
+        for (double x = -1.5; x <= 1.5; x += 0.3) {
+            for (double z = -1.0; z <= 1.5; z += 0.3) {
+                for (double y = -0.3; y <= 0.3; y += 0.3) {
+                    // Add some randomness to make it look more organic
+                    double offsetX = x + (Math.random() - 0.5) * 0.2;
+                    double offsetY = y + (Math.random() - 0.5) * 0.1;
+                    double offsetZ = z + (Math.random() - 0.5) * 0.2;
+
+                    // Use different particles based on intensity
+                    SimpleParticleType particleType = intensity > 0.7f ? ParticleTypes.FLAME :
+                            intensity > 0.4f ? ParticleTypes.SMOKE : ParticleTypes.CLOUD;
+
+                    serverLevel.sendParticles(particleType,
+                            centerX + offsetX, centerY + offsetY, centerZ + offsetZ,
+                            1, 0, 0, 0, 0);
+                }
+            }
+        }
+    }
+
+    private void createFingers(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
+        // Create 4 fingers
+        for (int finger = 0; finger < 4; finger++) {
+            double fingerX = -1.2 + (finger * 0.8); // Spread fingers across palm
+
+            // Each finger has 3 segments
+            for (int segment = 0; segment < 3; segment++) {
+                double segmentZ = 1.5 + (segment * 0.8); // Extend forward from palm
+                double segmentY = -segment * 0.2; // Slight downward curve
+
+                // Finger width decreases towards tip
+                double width = 0.3 - (segment * 0.1);
+
+                for (double w = -width; w <= width; w += 0.2) {
+                    double offsetX = fingerX + w + (Math.random() - 0.5) * 0.1;
+                    double offsetY = segmentY + (Math.random() - 0.5) * 0.1;
+                    double offsetZ = segmentZ + (Math.random() - 0.5) * 0.1;
+
+                    SimpleParticleType particleType = intensity > 0.7f ? ParticleTypes.SOUL_FIRE_FLAME :
+                            intensity > 0.4f ? ParticleTypes.LARGE_SMOKE : ParticleTypes.CLOUD;
+
+                    serverLevel.sendParticles(particleType,
+                            centerX + offsetX, centerY + offsetY, centerZ + offsetZ,
+                            1, 0, 0, 0, 0);
+                }
+            }
+        }
+    }
+
+    private void createThumb(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
+        // Create thumb on the side
+        for (int segment = 0; segment < 2; segment++) {
+            double thumbX = -2.0 - (segment * 0.5); // Extend to the side
+            double thumbZ = 0.5 + (segment * 0.3);
+            double thumbY = -segment * 0.1;
+
+            double width = 0.4 - (segment * 0.1);
+
+            for (double w = -width; w <= width; w += 0.2) {
+                for (double h = -width; h <= width; h += 0.2) {
+                    double offsetX = thumbX + (Math.random() - 0.5) * 0.1;
+                    double offsetY = thumbY + h + (Math.random() - 0.5) * 0.1;
+                    double offsetZ = thumbZ + w + (Math.random() - 0.5) * 0.1;
+
+                    SimpleParticleType particleType = intensity > 0.7f ? ParticleTypes.SOUL_FIRE_FLAME :
+                            intensity > 0.4f ? ParticleTypes.LARGE_SMOKE : ParticleTypes.CLOUD;
+
+                    serverLevel.sendParticles(particleType,
+                            centerX + offsetX, centerY + offsetY, centerZ + offsetZ,
+                            1, 0, 0, 0, 0);
+                }
+            }
+        }
+    }
+
+    private void createHandAura(ServerLevel serverLevel, double centerX, double centerY, double centerZ, float intensity) {
+        // Create a glowing aura around the entire hand
+        int particleCount = (int) (intensity * 15 + 5); // More particles as intensity increases
+
+        for (int i = 0; i < particleCount; i++) {
+            // Random position around the hand
+            double angle = Math.random() * 2 * Math.PI;
+            double distance = 2.5 + Math.random() * 1.5;
+            double height = Math.random() * 4 - 2; // -2 to +2 blocks around hand center
+
+            double auraX = centerX + Math.cos(angle) * distance;
+            double auraY = centerY + height;
+            double auraZ = centerZ + Math.sin(angle) * distance;
+
+            // Intense particles for high warning levels
+            if (intensity > 0.8f) {
+                serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                        auraX, auraY, auraZ, 1, 0.1, 0.1, 0.1, 0.02);
+            } else if (intensity > 0.5f) {
+                serverLevel.sendParticles(ParticleTypes.FLAME,
+                        auraX, auraY, auraZ, 1, 0.1, 0.1, 0.1, 0.01);
+            } else {
+                serverLevel.sendParticles(ParticleTypes.END_ROD,
+                        auraX, auraY, auraZ, 1, 0.1, 0.1, 0.1, 0.01);
+            }
+        }
+    }
+
+    // Also update the slamPlayer method to add more dramatic particles when the slam hits
     private void slamPlayer(Player player) {
+        if (player.getAbilities().mayfly && !player.isSpectator() && !player.isCreative()) {
+            player.getAbilities().flying = false;
+            player.onUpdateAbilities();
+        }
+
         // Create downward velocity to slam player to ground
-        Vec3 slamVelocity = new Vec3(0, -2.0, 0); // Strong downward force
+        Vec3 slamVelocity = new Vec3(0, -2.0, 0);
         player.setDeltaMovement(slamVelocity);
+        player.hurtMarked = true;
+
+        // Calculate damage based on armor
+        float armorValue = player.getArmorValue();
+        float armorToughness = (float) player.getAttributeValue(Attributes.ARMOR_TOUGHNESS);
+        float baseDamage = 6.0F;
+        float armorBasedDamage = baseDamage + (armorValue * 0.5F) + (armorToughness * 0.75F);
 
         // Deal damage
-        player.hurt(this.damageSources().mobAttack(this), 6.0F);
+        player.hurt(this.damageSources().mobAttack(this), armorBasedDamage);
 
-        // Play slam sound
-        this.playSound(SoundEvents.ANVIL_LAND, 1.0F, 0.8F);
+        // Apply debuff effects
+        int effectDuration = 40;
+        int slownessDuration = 30;
 
-        // Visual effect - you could add particle effects here if desired
-        // For now, we'll just play a sound at the player's location
+        player.addEffect(new MobEffectInstance(MobEffects.MOVEMENT_SLOWDOWN, slownessDuration, 2));
+        player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, effectDuration, 200));
+
+        // Play slam sound with more impact
+        this.playSound(SoundEvents.ANVIL_LAND, 2.0F, 0.5F); // Louder and deeper
+        player.playSound(SoundEvents.DRAGON_FIREBALL_EXPLODE, 1.5F, 0.8F); // Additional explosion sound
+
+        // Enhanced particle effects for the actual slam
+        if (this.level() instanceof ServerLevel serverLevel) {
+            double groundY = player.getY();
+            BlockPos playerPos = player.blockPosition();
+
+            // Find actual ground level
+            for (int i = 0; i < 10; i++) {
+                BlockPos checkPos = playerPos.below(i);
+                if (!this.level().getBlockState(checkPos).isAir()) {
+                    groundY = checkPos.getY() + 1;
+                    break;
+                }
+            }
+
+            // Create massive hand slam impact effect
+            createSlamImpactEffect(serverLevel, player.getX(), groundY, player.getZ());
+        }
+
         player.playSound(SoundEvents.PLAYER_HURT, 1.0F, 1.0F);
     }
+
+    // Add this method for the dramatic slam impact effect
+    private void createSlamImpactEffect(ServerLevel serverLevel, double centerX, double groundY, double centerZ) {
+        // Massive explosion at impact point
+        serverLevel.sendParticles(ParticleTypes.EXPLOSION_EMITTER,
+                centerX, groundY, centerZ, 3, 0, 0, 0, 0);
+
+        // Create hand print in particles
+        for (double x = -2; x <= 2; x += 0.2) {
+            for (double z = -2; z <= 2; z += 0.2) {
+                // Create a rough hand print pattern
+                boolean isHandPrint = isPartOfHandPrint(x, z);
+
+                if (isHandPrint) {
+                    // Multiple layers of particles for depth
+                    for (int layer = 0; layer < 3; layer++) {
+                        serverLevel.sendParticles(ParticleTypes.LARGE_SMOKE,
+                                centerX + x, groundY + 0.1 + (layer * 0.2), centerZ + z,
+                                2, 0.1, 0.1, 0.1, 0.02);
+                    }
+
+                    // Add some fire particles for dramatic effect
+                    if (Math.random() < 0.3) {
+                        serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                                centerX + x, groundY + 0.3, centerZ + z,
+                                1, 0, 0.1, 0, 0.05);
+                    }
+                }
+            }
+        }
+
+        // Expanding shockwave ring
+        for (int ring = 0; ring < 3; ring++) {
+            double radius = 3 + (ring * 2);
+            int particles = (int) (radius * 8); // More particles for larger rings
+
+            for (int i = 0; i < particles; i++) {
+                double angle = (i / (double) particles) * 2 * Math.PI;
+                double x = Math.cos(angle) * radius;
+                double z = Math.sin(angle) * radius;
+
+                serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                        centerX + x, groundY + 0.1, centerZ + z,
+                        1, 0, 0, 0, 0);
+            }
+        }
+
+        // Debris flying upward in hand shape
+        for (int i = 0; i < 50; i++) {
+            double x = (Math.random() - 0.5) * 4;
+            double z = (Math.random() - 0.5) * 4;
+
+            if (isPartOfHandPrint(x, z)) {
+                serverLevel.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                        centerX + x, groundY, centerZ + z,
+                        3, 0, 1.0, 0, 0.3);
+            }
+        }
+    }
+
+    // Helper method to determine if a point is part of the hand print pattern
+    private boolean isPartOfHandPrint(double x, double z) {
+        // Palm area
+        if (Math.abs(x) <= 1.5 && z >= -1.0 && z <= 1.5) {
+            return true;
+        }
+
+        // Fingers
+        for (int finger = 0; finger < 4; finger++) {
+            double fingerX = -1.2 + (finger * 0.8);
+            if (Math.abs(x - fingerX) <= 0.3 && z >= 1.5 && z <= 4.0) {
+                return true;
+            }
+        }
+
+        // Thumb
+        if (x >= -3.0 && x <= -1.5 && z >= 0.0 && z <= 1.5) {
+            return true;
+        }
+
+        return false;
+    }
+
 
     private void showBossBar() {
         // Add all nearby players to boss bar
@@ -343,9 +654,15 @@ public class Radiance extends Monster {
         super.addAdditionalSaveData(tag);
         tag.putDouble("GroundY", this.groundY);
         tag.putInt("Phase", this.state.ordinal());
+
+        // Save AOE knockback state
+        tag.putInt("KnockbackChargeTimer", this.knockbackChargeTimer);
+        tag.putInt("KnockbackCooldownTimer", this.knockbackCooldownTimer);
+        tag.putBoolean("IsChargingKnockback", this.isChargingKnockback);
+        tag.putBoolean("IsWindingUp", this.isWindingUp);
     }
 
-    // Load groundY from NBT data
+    // Update the readAdditionalSaveData method to load the new fields:
     @Override
     public void readAdditionalSaveData(CompoundTag tag) {
         super.readAdditionalSaveData(tag);
@@ -355,6 +672,323 @@ public class Radiance extends Monster {
         if (tag.contains("Phase")) {
             int stateInt = tag.getInt("Phase");
             this.state = PHASE.values()[stateInt];
+        }
+
+        // Load AOE knockback state
+        if (tag.contains("KnockbackChargeTimer")) {
+            this.knockbackChargeTimer = tag.getInt("KnockbackChargeTimer");
+        }
+        if (tag.contains("KnockbackCooldownTimer")) {
+            this.knockbackCooldownTimer = tag.getInt("KnockbackCooldownTimer");
+        }
+        if (tag.contains("IsChargingKnockback")) {
+            this.isChargingKnockback = tag.getBoolean("IsChargingKnockback");
+        }
+        if (tag.contains("IsWindingUp")) {
+            this.isWindingUp = tag.getBoolean("IsWindingUp");
+        }
+    }
+
+    private void performKnockbackAttack() {
+        // Handle cooldown timer
+        if (knockbackCooldownTimer > 0) {
+            knockbackCooldownTimer--;
+            return;
+        }
+
+        // Find all players within knockback range first
+        java.util.List<Player> playersInRange = this.level().getEntitiesOfClass(Player.class,
+                        new AABB(this.getX() - KNOCKBACK_RANGE, this.getY() - KNOCKBACK_RANGE, this.getZ() - KNOCKBACK_RANGE,
+                                this.getX() + KNOCKBACK_RANGE, this.getY() + KNOCKBACK_RANGE, this.getZ() + KNOCKBACK_RANGE))
+                .stream()
+                .filter(player -> !player.isCreative() && !player.isSpectator())
+                .collect(java.util.stream.Collectors.toList());
+
+        // If no players in range, reset everything
+        if (playersInRange.isEmpty()) {
+            if (isWindingUp || isChargingKnockback) {
+                isWindingUp = false;
+                isChargingKnockback = false;
+                knockbackChargeTimer = 0;
+            }
+            return;
+        }
+
+        // Start windup if not already started
+        if (!isWindingUp && !isChargingKnockback) {
+            isWindingUp = true;
+            knockbackChargeTimer = 0;
+
+            // Play subtle windup sound
+            this.playSound(SoundEvents.BEACON_AMBIENT, 0.8F, 1.2F);
+        }
+
+        // Handle windup phase
+        if (isWindingUp) {
+            knockbackChargeTimer++;
+            showWindupEffects(playersInRange);
+
+            if (knockbackChargeTimer >= KNOCKBACK_WINDUP_TIME) {
+                // Transition to charge phase
+                isWindingUp = false;
+                isChargingKnockback = true;
+                knockbackChargeTimer = 0;
+
+                // Play charge start sound
+                this.playSound(SoundEvents.BEACON_POWER_SELECT, 1.0F, 0.8F);
+
+                // Notify players that charge has started
+                for (Player player : playersInRange) {
+                    if (player instanceof ServerPlayer serverPlayer) {
+                        serverPlayer.sendSystemMessage(Component.literal("§6The Radiance begins to glow with power..."));
+                    }
+                }
+            }
+            return;
+        }
+
+        // Handle charge phase
+        if (isChargingKnockback) {
+            knockbackChargeTimer++;
+
+            // Show charging effects
+            showKnockbackChargeEffects(playersInRange);
+
+            // Execute knockback when fully charged
+            if (knockbackChargeTimer >= KNOCKBACK_CHARGE_TIME) {
+                executeAOEKnockback(playersInRange);
+
+                // Reset for next attack
+                isChargingKnockback = false;
+                knockbackChargeTimer = 0;
+                knockbackCooldownTimer = KNOCKBACK_COOLDOWN;
+            }
+        }
+    }
+
+    // Add this method to show subtle windup visual effects
+    private void showWindupEffects(java.util.List<Player> playersInRange) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        float windupProgress = (float) knockbackChargeTimer / KNOCKBACK_WINDUP_TIME;
+
+        // Subtle particle effects during windup - much less intense than charge phase
+        if (knockbackChargeTimer % 3 == 0) { // Every 3 ticks for sparse effects
+            // Small energy wisps around the boss
+            double angle = Math.random() * 2 * Math.PI;
+            double distance = 1.5 + Math.random() * 0.5;
+            double x = this.getX() + Math.cos(angle) * distance;
+            double z = this.getZ() + Math.sin(angle) * distance;
+            double y = this.getY() + 0.5 + Math.random() * 0.5;
+
+            serverLevel.sendParticles(ParticleTypes.END_ROD,
+                    x, y, z, 1, 0, 0.1, 0, 0.01);
+        }
+
+        // Very subtle ground effects at higher windup progress
+        if (windupProgress > 0.5f && knockbackChargeTimer % 5 == 0) {
+            for (int i = 0; i < 3; i++) {
+                double angle = (i / 3.0) * 2 * Math.PI + (knockbackChargeTimer * 0.1);
+                double radius = 1.0;
+                double x = this.getX() + Math.cos(angle) * radius;
+                double z = this.getZ() + Math.sin(angle) * radius;
+
+                serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                        x, this.getY() + 0.1, z, 1, 0, 0, 0, 0);
+            }
+        }
+    }
+
+    // Add this method to show charging visual effects
+    private void showKnockbackChargeEffects(java.util.List<Player> playersInRange) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        float chargeProgress = (float) knockbackChargeTimer / KNOCKBACK_CHARGE_TIME;
+
+        // Create expanding energy ring around the boss
+        double radius = KNOCKBACK_RANGE * chargeProgress;
+        int particles = Math.max(8, (int) (radius * 4));
+
+        for (int i = 0; i < particles; i++) {
+            double angle = (i / (double) particles) * 2 * Math.PI;
+            double x = Math.cos(angle) * radius;
+            double z = Math.sin(angle) * radius;
+
+            // Different particle types based on charge progress
+            SimpleParticleType particleType = chargeProgress > 0.8f ? ParticleTypes.SOUL_FIRE_FLAME :
+                    chargeProgress > 0.5f ? ParticleTypes.FLAME :
+                            ParticleTypes.END_ROD;
+
+            serverLevel.sendParticles(particleType,
+                    this.getX() + x, this.getY() + 0.1, this.getZ() + z,
+                    1, 0, 0, 0, 0);
+        }
+
+        // Create upward energy spirals around the boss
+        for (int i = 0; i < 3; i++) {
+            double spiralAngle = (knockbackChargeTimer * 0.3) + (i * 2.094); // 120 degrees apart
+            double spiralRadius = 2.0;
+            double spiralX = this.getX() + Math.cos(spiralAngle) * spiralRadius;
+            double spiralZ = this.getZ() + Math.sin(spiralAngle) * spiralRadius;
+            double spiralY = this.getY() + (chargeProgress * 3.0);
+
+            serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                    spiralX, spiralY, spiralZ, 2, 0.1, 0.1, 0.1, 0.05);
+        }
+
+        // Warning effects that intensify as charge builds
+        if (chargeProgress > 0.5f) {
+            // Play periodic warning sounds
+            if (knockbackChargeTimer % 10 == 0) {
+                float pitch = 0.8f + (chargeProgress * 0.6f);
+                this.playSound(SoundEvents.NOTE_BLOCK_BELL.value(), 0.5f + chargeProgress * 0.5f, pitch);
+            }
+
+            // Warn players in range with particles
+            for (Player player : playersInRange) {
+                if (chargeProgress > 0.8f) {
+                    // Intense warning for imminent attack
+                    serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
+                            player.getX(), player.getY() + 2.5, player.getZ(),
+                            3, 0.5, 0.3, 0.5, 0);
+
+                    if (player instanceof ServerPlayer serverPlayer && knockbackChargeTimer % 20 == 0) {
+                        serverPlayer.sendSystemMessage(Component.literal("§4INCOMING KNOCKBACK!"));
+                    }
+                } else {
+                    // Moderate warning
+                    serverLevel.sendParticles(ParticleTypes.CRIT,
+                            player.getX(), player.getY() + 2, player.getZ(),
+                            1, 0.3, 0.2, 0.3, 0.1);
+                }
+            }
+        }
+    }
+
+    // Add this method to execute the AOE knockback
+    private void executeAOEKnockback(java.util.List<Player> playersInRange) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Play powerful attack sound
+//        this.playSound(SoundEvents.GENERIC_EXPLODE, 2.0F, 0.6F);
+        this.playSound(SoundEvents.LIGHTNING_BOLT_THUNDER, 1.5F, 1.2F);
+
+        // Create massive explosion effect at boss location
+        serverLevel.sendParticles(ParticleTypes.EXPLOSION_EMITTER,
+                this.getX(), this.getY() + 1, this.getZ(), 5, 1, 1, 1, 0);
+
+        // Create expanding shockwave
+        createKnockbackShockwave(serverLevel);
+
+        // Apply knockback to all players in range
+        for (Player player : playersInRange) {
+            applyKnockbackToPlayer(player);
+        }
+
+        // Screen shake effect for all players in extended range
+        for (Player player : this.level().getEntitiesOfClass(Player.class,
+                new AABB(this.getX() - 20, this.getY() - 20, this.getZ() - 20,
+                        this.getX() + 20, this.getY() + 20, this.getZ() + 20))) {
+
+            createScreenShakeEffect(serverLevel, player);
+        }
+    }
+
+    // Add this helper method to apply knockback to individual players
+    private void applyKnockbackToPlayer(Player player) {
+        // Calculate distance and direction
+        double deltaX = player.getX() - this.getX();
+        double deltaZ = player.getZ() - this.getZ();
+        double distance = Math.sqrt(deltaX * deltaX + deltaZ * deltaZ);
+
+        if (distance == 0) distance = 0.1; // Prevent division by zero
+
+        // Calculate knockback direction (away from boss)
+        double directionX = deltaX / distance;
+        double directionZ = deltaZ / distance;
+
+        // Scale knockback based on distance (closer = stronger knockback)
+        double distanceMultiplier = Math.max(0.5, 1.0 - (distance / KNOCKBACK_RANGE));
+
+        // Apply knockback velocity
+        Vec3 knockbackVelocity = new Vec3(
+                directionX * KNOCKBACK_STRENGTH * distanceMultiplier,
+                LAUNCH_STRENGTH * distanceMultiplier,
+                directionZ * KNOCKBACK_STRENGTH * distanceMultiplier
+        );
+
+        player.setDeltaMovement(knockbackVelocity);
+        player.setOnGround(false);
+        player.hurtMarked = true;
+
+        // Deal damage based on distance
+        float baseDamage = 4.0F;
+        float actualDamage = (float) (baseDamage * distanceMultiplier);
+        player.hurt(this.damageSources().mobAttack(this), actualDamage);
+
+        // Play individual player sounds
+        player.playSound(SoundEvents.PLAYER_ATTACK_KNOCKBACK, 1.5F, 0.7F);
+
+        // Send message to player
+        if (player instanceof ServerPlayer serverPlayer) {
+            String intensityMessage = distanceMultiplier > 0.8 ? "§4violently repels" :
+                    distanceMultiplier > 0.5 ? "§crejects" : "§epushes away";
+            serverPlayer.sendSystemMessage(Component.literal("§6The Radiance " + intensityMessage + " you!"));
+        }
+    }
+
+    // Add this method to create the shockwave visual effect
+    private void createKnockbackShockwave(ServerLevel serverLevel) {
+        // Multiple expanding rings for dramatic effect
+        for (int ring = 0; ring < 4; ring++) {
+            double baseRadius = 2.0 + (ring * 2.5);
+            int particlesPerRing = (int) (baseRadius * 6);
+
+            for (int i = 0; i < particlesPerRing; i++) {
+                double angle = (i / (double) particlesPerRing) * 2 * Math.PI;
+
+                // Create multiple radius points for thickness
+                for (double radiusOffset = -0.5; radiusOffset <= 0.5; radiusOffset += 0.25) {
+                    double radius = baseRadius + radiusOffset;
+                    double x = Math.cos(angle) * radius;
+                    double z = Math.sin(angle) * radius;
+
+                    SimpleParticleType particleType = ring == 0 ? ParticleTypes.SOUL_FIRE_FLAME :
+                            ring == 1 ? ParticleTypes.FLAME :
+                                    ring == 2 ? ParticleTypes.LARGE_SMOKE :
+                                            ParticleTypes.CLOUD;
+
+                    serverLevel.sendParticles(particleType,
+                            this.getX() + x, this.getY() + 0.1, this.getZ() + z,
+                            2, 0, 0.2, 0, 0.1);
+                }
+            }
+        }
+
+        // Create debris effect
+        for (int i = 0; i < 30; i++) {
+            double angle = Math.random() * 2 * Math.PI;
+            double distance = Math.random() * KNOCKBACK_RANGE;
+            double x = Math.cos(angle) * distance;
+            double z = Math.sin(angle) * distance;
+
+            serverLevel.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                    this.getX() + x, this.getY(), this.getZ() + z,
+                    3, 0.2, 1.5, 0.2, 0.3);
+        }
+    }
+
+    // Add this method for screen shake effect
+    private void createScreenShakeEffect(ServerLevel serverLevel, Player player) {
+        // Create particles around player's view to simulate screen shake
+        for (int i = 0; i < 8; i++) {
+            double offsetX = (Math.random() - 0.5) * 2;
+            double offsetY = (Math.random() - 0.5) * 2;
+            double offsetZ = (Math.random() - 0.5) * 2;
+
+            serverLevel.sendParticles(ParticleTypes.SWEEP_ATTACK,
+                    player.getX() + offsetX, player.getEyeY() + offsetY, player.getZ() + offsetZ,
+                    1, 0, 0, 0, 0);
         }
     }
 
