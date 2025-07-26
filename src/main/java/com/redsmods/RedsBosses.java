@@ -1,5 +1,6 @@
 package com.redsmods;
 
+import com.redsmods.common.BlockPlacementHandler;
 import com.redsmods.common.client.model.RadianceModel;
 import com.redsmods.common.client.renderer.RadianceRenderer;
 import com.redsmods.common.entity.Radiance;
@@ -78,6 +79,8 @@ public class RedsBosses {
 
         // Register entity attributes
         modEventBus.addListener(this::registerEntityAttributes);
+
+        NeoForge.EVENT_BUS.register(new BlockPlacementHandler());
 
         if (FMLEnvironment.dist == Dist.CLIENT) {
             modEventBus.addListener(this::registerRenderers);

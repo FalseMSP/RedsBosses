@@ -69,9 +69,9 @@ public class Radiance extends Monster {
 
     // Knockback Fields
     private int knockbackChargeTimer = 0;
-    private static final int KNOCKBACK_WINDUP_TIME = 15; // 0.75 seconds windup before starting charge
-    private static final int KNOCKBACK_CHARGE_TIME = 20; // 1 seconds charge time
-    private static final int KNOCKBACK_COOLDOWN = 20*10; // 10 second cooldown between attacks
+    private static final int KNOCKBACK_WINDUP_TIME = 5; // 0.25 seconds windup before starting charge
+    private static final int KNOCKBACK_CHARGE_TIME = 30; // 1.5 seconds charge time
+    private static final int KNOCKBACK_COOLDOWN = 20*15; // 15 second cooldown between attacks
     private int knockbackCooldownTimer = 0;
     private static final double KNOCKBACK_RANGE = 9.0; // 9 blocks range
     private static final double KNOCKBACK_STRENGTH = 15.0; // Horizontal knockback strength
@@ -90,6 +90,17 @@ public class Radiance extends Monster {
     private final Set<BlockPos> safeZones = new HashSet<>();
     private static final int SPEAR_HEIGHT = 8; // How tall the spears are
     private static final int SAFE_ZONE_RADIUS = 3; // Radius of safe zones around players
+
+    // explode blocks time
+    private final Map<BlockPos, Long> recentBlockPlacements = new HashMap<>();
+    private static final int BLOCK_DETECTION_RANGE = 8;
+    private static final int BLOCK_PLACEMENT_WINDOW = 100; // 5 seconds in ticks
+    private int blockExplosionCooldown = 0;
+    private static final int BLOCK_EXPLOSION_COOLDOWN = 20; // 1 seconds between explosions
+    private boolean isBlockExplosionActive = false;
+    private int blockExplosionTimer = 0;
+    private static final int BLOCK_EXPLOSION_WARNING_TIME = 40; // 2 seconds warning
+    private final Set<BlockPos> blocksToExplode = new HashSet<>();
 
 
     public Radiance(EntityType<? extends Monster> entityType, Level level) {
@@ -248,6 +259,9 @@ public class Radiance extends Monster {
 
             // spear to bully people
             performGiantSpearAttack();
+
+            // explode if blocks
+            performBlockExplosionAttack();
         }
 
         // Break blocks within hitbox
@@ -896,9 +910,16 @@ public class Radiance extends Monster {
         tag.putInt("KnockbackCooldownTimer", this.knockbackCooldownTimer);
         tag.putBoolean("IsChargingKnockback", this.isChargingKnockback);
         tag.putBoolean("IsWindingUp", this.isWindingUp);
+
+        // spear
         tag.putInt("SpearAttackTimer", this.spearAttackTimer);
         tag.putInt("SpearAttackCooldown", this.spearAttackCooldown);
         tag.putBoolean("IsSpearAttackActive", this.isSpearAttackActive);
+
+        // block explosions
+        tag.putInt("BlockExplosionCooldown", this.blockExplosionCooldown);
+        tag.putBoolean("IsBlockExplosionActive", this.isBlockExplosionActive);
+        tag.putInt("BlockExplosionTimer", this.blockExplosionTimer);
     }
 
     // Update the readAdditionalSaveData method to load the new fields:
@@ -934,6 +955,16 @@ public class Radiance extends Monster {
         }
         if (tag.contains("IsSpearAttackActive")) {
             this.isSpearAttackActive = tag.getBoolean("IsSpearAttackActive");
+        }
+
+        if (tag.contains("BlockExplosionCooldown")) {
+            this.blockExplosionCooldown = tag.getInt("BlockExplosionCooldown");
+        }
+        if (tag.contains("IsBlockExplosionActive")) {
+            this.isBlockExplosionActive = tag.getBoolean("IsBlockExplosionActive");
+        }
+        if (tag.contains("BlockExplosionTimer")) {
+            this.blockExplosionTimer = tag.getInt("BlockExplosionTimer");
         }
     }
 
@@ -1219,6 +1250,349 @@ public class Radiance extends Monster {
             serverLevel.sendParticles(ParticleTypes.SWEEP_ATTACK,
                     player.getX() + offsetX, player.getEyeY() + offsetY, player.getZ() + offsetZ,
                     1, 0, 0, 0, 0);
+        }
+    }
+
+    private void performBlockExplosionAttack() {
+        // Handle cooldown
+        if (blockExplosionCooldown > 0) {
+            blockExplosionCooldown--;
+            return;
+        }
+
+        // Clean up old block placement records
+        cleanOldBlockPlacements();
+
+        // Check for recently placed blocks in range
+        Set<BlockPos> dangerousBlocks = findDangerousBlocks();
+
+        if (!dangerousBlocks.isEmpty() && !isBlockExplosionActive) {
+            startBlockExplosion(dangerousBlocks);
+        }
+
+        // Handle active explosion sequence
+        if (isBlockExplosionActive) {
+            handleActiveBlockExplosion();
+        }
+    }
+
+    // Method to detect when blocks are placed (call this from a block placement event or check periodically)
+    public void onBlockPlaced(BlockPos pos) {
+        // Check if block is within range of boss
+        double distance = Math.sqrt(pos.distSqr(this.blockPosition()));
+        if (distance <= BLOCK_DETECTION_RANGE && state != PHASE.DEACTIVATED_IDOL) {
+            recentBlockPlacements.put(pos, this.level().getGameTime());
+
+            // Play warning sound immediately
+            this.playSound(SoundEvents.NOTE_BLOCK_BASS.value(), 1.0F, 0.5F);
+
+            // Show immediate warning particles
+            if (this.level() instanceof ServerLevel serverLevel) {
+                serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
+                        pos.getX() + 0.5, pos.getY() + 1, pos.getZ() + 0.5,
+                        3, 0.2, 0.2, 0.2, 0);
+            }
+        }
+    }
+
+    // Alternative method to scan for blocks if you can't hook into placement events
+    private void scanForNewBlocks() {
+        BlockPos bossPos = this.blockPosition();
+
+        for (int x = -BLOCK_DETECTION_RANGE; x <= BLOCK_DETECTION_RANGE; x++) {
+            for (int y = -BLOCK_DETECTION_RANGE; y <= BLOCK_DETECTION_RANGE; y++) {
+                for (int z = -BLOCK_DETECTION_RANGE; z <= BLOCK_DETECTION_RANGE; z++) {
+                    BlockPos checkPos = bossPos.offset(x, y, z);
+
+                    // Skip if too far
+                    if (checkPos.distSqr(bossPos) > BLOCK_DETECTION_RANGE * BLOCK_DETECTION_RANGE) {
+                        continue;
+                    }
+
+                    BlockState state = this.level().getBlockState(checkPos);
+
+                    // Check if this is a player-placed block (you might need to adjust this logic)
+                    if (!state.isAir() &&
+                            !state.is(Blocks.BEDROCK) &&
+                            !recentBlockPlacements.containsKey(checkPos) &&
+                            isPlayerPlaceableBlock(state)) {
+
+                        // Assume it's recently placed if we haven't seen it before
+                        recentBlockPlacements.put(checkPos, this.level().getGameTime());
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean isPlayerPlaceableBlock(BlockState state) {
+        // Add logic to determine if this is likely a player-placed block
+        // This is a simple implementation - you might want to expand it
+        return !state.is(Blocks.STONE) &&
+                !state.is(Blocks.DIRT) &&
+                !state.is(Blocks.GRASS_BLOCK) &&
+                !state.is(Blocks.DEEPSLATE) &&
+                !state.is(Blocks.POINTED_DRIPSTONE) &&
+                !state.is(Blocks.DRIPSTONE_BLOCK);
+    }
+
+    private void cleanOldBlockPlacements() {
+        long currentTime = this.level().getGameTime();
+        recentBlockPlacements.entrySet().removeIf(entry ->
+                currentTime - entry.getValue() > BLOCK_PLACEMENT_WINDOW);
+    }
+
+    private Set<BlockPos> findDangerousBlocks() {
+        Set<BlockPos> dangerous = new HashSet<>();
+        long currentTime = this.level().getGameTime();
+
+        for (Map.Entry<BlockPos, Long> entry : recentBlockPlacements.entrySet()) {
+            // Only consider blocks placed within the time window
+            if (currentTime - entry.getValue() <= BLOCK_PLACEMENT_WINDOW) {
+                BlockPos pos = entry.getKey();
+
+                // Verify block still exists and is within range
+                if (!this.level().getBlockState(pos).isAir() &&
+                        pos.distSqr(this.blockPosition()) <= BLOCK_DETECTION_RANGE * BLOCK_DETECTION_RANGE) {
+                    dangerous.add(pos);
+                }
+            }
+        }
+
+        return dangerous;
+    }
+
+    private void startBlockExplosion(Set<BlockPos> dangerousBlocks) {
+        isBlockExplosionActive = true;
+        blockExplosionTimer = 0;
+        blocksToExplode.clear();
+        blocksToExplode.addAll(dangerousBlocks);
+
+        // Play dramatic warning sound
+        this.playSound(SoundEvents.WITHER_SPAWN, 2.0F, 0.6F);
+    }
+
+    private void handleActiveBlockExplosion() {
+        blockExplosionTimer++;
+
+        if (blockExplosionTimer <= BLOCK_EXPLOSION_WARNING_TIME) {
+            // Warning phase
+            showBlockExplosionWarning();
+        } else {
+            // Execute explosion
+            executeBlockExplosion();
+
+            // End explosion sequence
+            isBlockExplosionActive = false;
+            blockExplosionTimer = 0;
+            blockExplosionCooldown = BLOCK_EXPLOSION_COOLDOWN;
+            blocksToExplode.clear();
+        }
+    }
+
+    private void showBlockExplosionWarning() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        float warningProgress = (float) blockExplosionTimer / BLOCK_EXPLOSION_WARNING_TIME;
+
+        // Show boss charging up
+        for (int i = 0; i < 5; i++) {
+            double angle = Math.random() * 2 * Math.PI;
+            double distance = 2.0 + Math.random() * 1.0;
+            double x = this.getX() + Math.cos(angle) * distance;
+            double z = this.getZ() + Math.sin(angle) * distance;
+            double y = this.getY() + 0.5 + Math.random() * 2.0;
+
+            SimpleParticleType particleType = warningProgress > 0.8f ? ParticleTypes.SOUL_FIRE_FLAME :
+                    warningProgress > 0.5f ? ParticleTypes.FLAME : ParticleTypes.ENCHANTED_HIT;
+
+            serverLevel.sendParticles(particleType, x, y, z, 1, 0.1, 0.1, 0.1, 0.05);
+        }
+
+        // Show warning effects on target blocks
+        for (BlockPos blockPos : blocksToExplode) {
+            // Verify block still exists
+            if (!this.level().getBlockState(blockPos).isAir()) {
+                // Intensifying warning particles
+                int particleCount = (int) (warningProgress * 10 + 2);
+
+                for (int i = 0; i < particleCount; i++) {
+                    double offsetX = (Math.random() - 0.5) * 1.2;
+                    double offsetY = Math.random() * 1.5;
+                    double offsetZ = (Math.random() - 0.5) * 1.2;
+
+                    SimpleParticleType particleType = warningProgress > 0.9f ? ParticleTypes.SOUL_FIRE_FLAME :
+                            warningProgress > 0.7f ? ParticleTypes.FLAME :
+                                    warningProgress > 0.4f ? ParticleTypes.SMOKE : ParticleTypes.CRIT;
+
+                    serverLevel.sendParticles(particleType,
+                            blockPos.getX() + 0.5 + offsetX,
+                            blockPos.getY() + offsetY,
+                            blockPos.getZ() + 0.5 + offsetZ,
+                            1, 0, 0, 0, 0.02);
+                }
+
+                // Create warning aura around block
+                if (blockExplosionTimer % 5 == 0) {
+                    double radius = 1.5;
+                    int auraParticles = 8;
+
+                    for (int i = 0; i < auraParticles; i++) {
+                        double angle = (i / (double) auraParticles) * 2 * Math.PI;
+                        double x = blockPos.getX() + 0.5 + Math.cos(angle) * radius;
+                        double z = blockPos.getZ() + 0.5 + Math.sin(angle) * radius;
+
+                        serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
+                                x, blockPos.getY() + 1, z, 1, 0, 0, 0, 0);
+                    }
+                }
+            }
+        }
+
+        // Escalating warning sounds
+        if (blockExplosionTimer % 10 == 0) {
+            float pitch = 0.5f + (warningProgress * 1.0f);
+            this.playSound(SoundEvents.NOTE_BLOCK_PLING.value(), 1.0f + warningProgress, pitch);
+        }
+
+        // Final countdown
+        if (warningProgress > 0.8f && blockExplosionTimer % 5 == 0) {
+            this.playSound(SoundEvents.NOTE_BLOCK_BELL.value(), 2.0f, 2.0f);
+        }
+    }
+
+    private void executeBlockExplosion() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Play massive explosion sound
+        this.playSound(SoundEvents.DRAGON_FIREBALL_EXPLODE, 3.0F, 0.4F);
+        this.playSound(SoundEvents.LIGHTNING_BOLT_THUNDER, 2.0F, 0.8F);
+
+        // Create explosion effects and destroy blocks
+        for (BlockPos blockPos : new HashSet<>(blocksToExplode)) {
+            // Verify block still exists before exploding
+            if (!this.level().getBlockState(blockPos).isAir()) {
+                // Create explosion at block location
+                createBlockExplosionEffect(serverLevel, blockPos);
+
+                // Destroy the block and surrounding blocks
+                explodeBlockArea(blockPos);
+
+                // Damage nearby players
+                damagePlayersNearBlock(blockPos);
+            }
+        }
+
+        // Create boss explosion effect
+        serverLevel.sendParticles(ParticleTypes.EXPLOSION_EMITTER,
+                this.getX(), this.getY() + 1, this.getZ(), 3, 1, 1, 1, 0);
+
+        // Clear the placement records for exploded blocks
+        for (BlockPos explodedPos : blocksToExplode) {
+            recentBlockPlacements.remove(explodedPos);
+        }
+    }
+
+    private void createBlockExplosionEffect(ServerLevel serverLevel, BlockPos blockPos) {
+        // Main explosion at block
+        serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                blockPos.getX() + 0.5, blockPos.getY() + 0.5, blockPos.getZ() + 0.5,
+                5, 0.5, 0.5, 0.5, 0);
+
+        // Flame burst
+        serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                blockPos.getX() + 0.5, blockPos.getY() + 0.5, blockPos.getZ() + 0.5,
+                20, 1.0, 1.0, 1.0, 0.2);
+
+        // Debris effect
+        for (int i = 0; i < 15; i++) {
+            double velocityX = (Math.random() - 0.5) * 2.0;
+            double velocityY = Math.random() * 2.0;
+            double velocityZ = (Math.random() - 0.5) * 2.0;
+
+            serverLevel.sendParticles(ParticleTypes.LAVA,
+                    blockPos.getX() + 0.5, blockPos.getY() + 0.5, blockPos.getZ() + 0.5,
+                    1, velocityX, velocityY, velocityZ, 0.5);
+        }
+
+        // Shockwave ring
+        int ringParticles = 12;
+        for (int i = 0; i < ringParticles; i++) {
+            double angle = (i / (double) ringParticles) * 2 * Math.PI;
+            double radius = 2.0;
+            double x = blockPos.getX() + 0.5 + Math.cos(angle) * radius;
+            double z = blockPos.getZ() + 0.5 + Math.sin(angle) * radius;
+
+            serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                    x, blockPos.getY() + 0.1, z, 1, 0, 0, 0, 0);
+        }
+    }
+
+    private void explodeBlockArea(BlockPos center) {
+        // Destroy the target block and nearby blocks in a small radius
+        int explosionRadius = 2;
+
+        for (int x = -explosionRadius; x <= explosionRadius; x++) {
+            for (int y = -explosionRadius; y <= explosionRadius; y++) {
+                for (int z = -explosionRadius; z <= explosionRadius; z++) {
+                    BlockPos pos = center.offset(x, y, z);
+                    double distance = Math.sqrt(x*x + y*y + z*z);
+
+                    if (distance <= explosionRadius) {
+                        BlockState state = this.level().getBlockState(pos);
+
+                        // Don't destroy bedrock or air
+                        if (!state.isAir() && !state.is(Blocks.BEDROCK)) {
+                            // Higher chance to destroy blocks closer to center
+                            double destroyChance = 1.0 - (distance / explosionRadius) * 0.5;
+
+                            if (Math.random() < destroyChance) {
+                                this.level().destroyBlock(pos, true); // Drop items
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void damagePlayersNearBlock(BlockPos blockPos) {
+        double damageRadius = 4.0;
+
+        for (Player player : this.level().getEntitiesOfClass(Player.class,
+                new AABB(blockPos.getX() - damageRadius, blockPos.getY() - damageRadius, blockPos.getZ() - damageRadius,
+                        blockPos.getX() + damageRadius, blockPos.getY() + damageRadius, blockPos.getZ() + damageRadius))) {
+
+            if (player.isCreative() || player.isSpectator()) continue;
+
+            double distance = Math.sqrt(player.blockPosition().distSqr(blockPos));
+            if (distance <= damageRadius) {
+                // Calculate damage based on distance
+                float baseDamage = 45.0F;
+                float distanceMultiplier = (float) Math.max(0.3, 1.0 - (distance / damageRadius));
+                float actualDamage = baseDamage * distanceMultiplier;
+
+                // Deal damage
+                player.hurt(this.damageSources().explosion(this, this), actualDamage);
+
+                // Apply knockback away from explosion
+                Vec3 knockbackDirection = new Vec3(
+                        player.getX() - (blockPos.getX() + 0.5),
+                        0.5, // Slight upward knockback
+                        player.getZ() - (blockPos.getZ() + 0.5)
+                ).normalize();
+
+                double knockbackStrength = 1.5 * distanceMultiplier;
+                player.setDeltaMovement(player.getDeltaMovement().add(
+                        knockbackDirection.x * knockbackStrength,
+                        knockbackDirection.y * knockbackStrength,
+                        knockbackDirection.z * knockbackStrength
+                ));
+                player.hurtMarked = true;
+
+                // Apply brief blindness effect
+                player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, 20, 0));
+            }
         }
     }
 
