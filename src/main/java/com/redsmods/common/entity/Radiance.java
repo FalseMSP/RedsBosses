@@ -102,12 +102,36 @@ public class Radiance extends Monster {
     private static final int BLOCK_EXPLOSION_WARNING_TIME = 40; // 2 seconds warning
     private final Set<BlockPos> blocksToExplode = new HashSet<>();
 
+    // arrow stuff
+    public static final double ARROW_REFLECTION_RANGE = 10;
+
+    // Armor Steal Attack
+    private static final double ARMOR_STEAL_RANGE = 6.0; // a little further than entity reach
+    private static final int ARMOR_STEAL_COOLDOWN = 20 * 25; // 25 second cooldown
+    private static final int GRAB_DURATION = 60; // 3 seconds of holding player
+    private static final int GRAB_HEIGHT = 8; // How high to lift the player
+    private int armorStealCooldown = 0;
+    private boolean isGrabbingPlayer = false;
+    private Player grabbedPlayer = null;
+    private int grabTimer = 0;
+    private Vec3 grabPosition = null;
+
 
     public Radiance(EntityType<? extends Monster> entityType, Level level) {
         super(entityType, level);
         // Set boss bar properties
         this.bossEvent.setDarkenScreen(true);
         this.bossEvent.setPlayBossMusic(true);
+
+        this.setCanPickUpLoot(true);
+    }
+
+    @Override
+    public boolean canReplaceCurrentItem(net.minecraft.world.item.ItemStack candidate, net.minecraft.world.item.ItemStack existing) {
+        if (candidate.isEmpty()) return false;
+
+        // Always allow replacement during armor stealing
+        return true;
     }
 
     public static AttributeSupplier.Builder createAttributes() {
@@ -262,6 +286,15 @@ public class Radiance extends Monster {
 
             // explode if blocks
             performBlockExplosionAttack();
+
+            // reflect arrows if not using knockback attack and spears are not up
+            if (!isWindingUp && !isChargingKnockback && !isSpearAttackActive) {
+                performArrowReflection();
+            }
+
+            // armor steal attack IF KNOCKBACK IS ON COOLDOWN
+            if (knockbackCooldownTimer > 1 && knockbackCooldownTimer < KNOCKBACK_COOLDOWN - 20*3) // only attack if knockback is on cooldown AFTER 3 seconds.
+                performArmorStealAttack();
         }
 
         // Break blocks within hitbox
@@ -269,6 +302,478 @@ public class Radiance extends Monster {
 
         // Update boss bar
         updateBossBar();
+    }
+
+    // Add this method to handle the armor stealing attack
+    private void performArmorStealAttack() {
+        // Handle cooldown
+        if (armorStealCooldown > 0) {
+            armorStealCooldown--;
+            return;
+        }
+
+        // Handle active grab
+        if (isGrabbingPlayer) {
+            handleActiveGrab();
+            return;
+        }
+
+        // Find target for new grab
+        List<Player> playersInRange = this.level().getEntitiesOfClass(Player.class,
+                        new AABB(this.getX() - ARMOR_STEAL_RANGE, this.getY() - ARMOR_STEAL_RANGE, this.getZ() - ARMOR_STEAL_RANGE,
+                                this.getX() + ARMOR_STEAL_RANGE, this.getY() + ARMOR_STEAL_RANGE, this.getZ() + ARMOR_STEAL_RANGE))
+                .stream()
+                .filter(player -> !player.isCreative() && !player.isSpectator() && hasStealableArmor(player))
+                .collect(java.util.stream.Collectors.toList());
+
+        if (!playersInRange.isEmpty()) {
+            // Select random player with armor
+            Player target = playersInRange.get(this.random.nextInt(playersInRange.size()));
+            startArmorGrab(target);
+        }
+    }
+
+    // Check if player has armor that can be stolen
+    private boolean hasStealableArmor(Player player) {
+        return !player.getInventory().armor.get(0).isEmpty() || // Boots
+                !player.getInventory().armor.get(1).isEmpty() || // Leggings
+                !player.getInventory().armor.get(2).isEmpty() || // Chestplate
+                !player.getInventory().armor.get(3).isEmpty();   // Helmet
+    }
+
+    // Start grabbing a player
+    private void startArmorGrab(Player target) {
+        isGrabbingPlayer = true;
+        grabbedPlayer = target;
+        grabTimer = 0;
+
+        // Calculate grab position (above the boss)
+        grabPosition = new Vec3(this.getX(), this.getY() + GRAB_HEIGHT, this.getZ());
+
+        // Play dramatic grab sound
+        this.playSound(SoundEvents.WITHER_SPAWN, 2.0F, 0.6F);
+        this.playSound(SoundEvents.ENCHANTMENT_TABLE_USE, 1.5F, 0.8F);
+
+        // Announce the grab
+        if (target instanceof ServerPlayer serverPlayer) {
+            serverPlayer.sendSystemMessage(Component.literal("§4You are caught in the boss's grasp!"));
+        }
+
+        // Show initial grab effects
+        if (this.level() instanceof ServerLevel serverLevel) {
+            createGrabStartEffect(serverLevel, target);
+        }
+    }
+
+    // Handle the active grab sequence
+    private void handleActiveGrab() {
+        grabTimer++;
+
+        if (grabbedPlayer == null || grabbedPlayer.isRemoved() || grabbedPlayer.isCreative()) {
+            endGrab(false);
+            return;
+        }
+
+        // Keep player in grab position
+        maintainGrabPosition();
+
+        // Show ongoing grab effects
+        if (this.level() instanceof ServerLevel serverLevel) {
+            showGrabEffects(serverLevel);
+        }
+
+        // Play periodic sounds
+        if (grabTimer % 20 == 0) {
+            this.playSound(SoundEvents.BEACON_AMBIENT, 1.0F, 0.7F);
+            grabbedPlayer.playSound(SoundEvents.PLAYER_HURT, 0.5F, 1.2F);
+        }
+
+        // Execute armor steal at halfway point
+        if (grabTimer == GRAB_DURATION / 2) {
+            stealArmorFromPlayer();
+        }
+
+        // End grab when duration is complete
+        if (grabTimer >= GRAB_DURATION) {
+            endGrab(true);
+        }
+    }
+
+    // Keep the grabbed player at the grab position
+    private void maintainGrabPosition() {
+        if (grabbedPlayer != null && grabPosition != null) {
+            // Disable player abilities
+            if (!grabbedPlayer.isSpectator() && !grabbedPlayer.isCreative()) {
+                grabbedPlayer.getAbilities().flying = false;
+                grabbedPlayer.onUpdateAbilities();
+            }
+
+            // Force player position
+            grabbedPlayer.teleportTo(grabPosition.x, grabPosition.y, grabPosition.z);
+            grabbedPlayer.setDeltaMovement(Vec3.ZERO);
+            grabbedPlayer.setOnGround(false);
+            grabbedPlayer.hurtMarked = true;
+
+            // Apply slow falling to prevent fall damage when released
+            grabbedPlayer.addEffect(new MobEffectInstance(MobEffects.SLOW_FALLING, 60, 0));
+        }
+    }
+
+    // Show visual effects during grab
+    private void showGrabEffects(ServerLevel serverLevel) {
+        if (grabbedPlayer == null || grabPosition == null) return;
+
+        // Create energy chains connecting boss to player
+        Vec3 bossPos = new Vec3(this.getX(), this.getY() + 2, this.getZ());
+        Vec3 playerPos = grabPosition;
+
+        // Draw energy line between boss and player
+        int chainSegments = 10;
+        for (int i = 0; i <= chainSegments; i++) {
+            double t = i / (double) chainSegments;
+            Vec3 chainPos = bossPos.lerp(playerPos, t);
+
+            // Add slight wave to the chain
+            double wave = Math.sin(grabTimer * 0.3 + i * 0.5) * 0.3;
+            chainPos = chainPos.add(wave, 0, 0);
+
+            serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                    chainPos.x, chainPos.y, chainPos.z, 2, 0.1, 0.1, 0.1, 0.02);
+        }
+
+        // Create containment field around player
+        double radius = 2.0;
+        int particles = 12;
+        for (int i = 0; i < particles; i++) {
+            double angle = (i / (double) particles) * 2 * Math.PI + (grabTimer * 0.1);
+            double x = playerPos.x + Math.cos(angle) * radius;
+            double z = playerPos.z + Math.sin(angle) * radius;
+            double y = playerPos.y + Math.sin(grabTimer * 0.2 + i) * 0.5;
+
+            serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                    x, y, z, 1, 0, 0, 0, 0);
+        }
+
+        // Energy swirl around boss
+        for (int i = 0; i < 5; i++) {
+            double angle = (grabTimer * 0.2) + (i * 1.256); // 72 degrees apart
+            double distance = 3.0;
+            double x = this.getX() + Math.cos(angle) * distance;
+            double z = this.getZ() + Math.sin(angle) * distance;
+            double y = this.getY() + 1 + Math.sin(grabTimer * 0.1 + i) * 1.0;
+
+            serverLevel.sendParticles(ParticleTypes.END_ROD,
+                    x, y, z, 1, 0, 0.1, 0, 0.05);
+        }
+    }
+
+    // Create initial grab effect
+    private void createGrabStartEffect(ServerLevel serverLevel, Player target) {
+        // Explosion of particles at target location
+        serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                target.getX(), target.getY() + 1, target.getZ(), 20, 1.0, 1.0, 1.0, 0.3);
+
+        // Create magical circle on ground below target
+        BlockPos targetPos = target.blockPosition();
+        for (int i = 0; i < 16; i++) {
+            double angle = (i / 16.0) * 2 * Math.PI;
+            double radius = 3.0;
+            double x = targetPos.getX() + 0.5 + Math.cos(angle) * radius;
+            double z = targetPos.getZ() + 0.5 + Math.sin(angle) * radius;
+
+            serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                    x, targetPos.getY() + 0.1, z, 2, 0, 0, 0, 0);
+        }
+    }
+
+    // Steal armor from the grabbed player
+    private void stealArmorFromPlayer() {
+        if (grabbedPlayer == null) return;
+
+        // Get all armor pieces that can be stolen
+        List<Integer> armorSlots = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            if (!grabbedPlayer.getInventory().armor.get(i).isEmpty()) {
+                armorSlots.add(i);
+            }
+        }
+
+        if (armorSlots.isEmpty()) {
+            return; // No armor to steal
+        }
+
+        // Select random armor piece
+        int selectedSlot = armorSlots.get(this.random.nextInt(armorSlots.size()));
+        net.minecraft.world.item.ItemStack stolenArmor = grabbedPlayer.getInventory().armor.get(selectedSlot);
+
+        // Remove armor from player
+        grabbedPlayer.getInventory().armor.set(selectedSlot, net.minecraft.world.item.ItemStack.EMPTY);
+
+        // Try to equip the armor on the boss if it's better
+        equipStolenArmor(stolenArmor, selectedSlot);
+
+        // Play steal sound
+        this.playSound(SoundEvents.ITEM_PICKUP, 2.0F, 0.7F);
+        this.playSound(SoundEvents.ENCHANTMENT_TABLE_USE, 1.5F, 1.2F);
+
+        // Show steal effects
+        if (this.level() instanceof ServerLevel serverLevel) {
+            createArmorStealEffect(serverLevel, stolenArmor);
+        }
+
+        // Announce what was stolen
+        String armorName = getArmorTypeName(selectedSlot);
+        if (grabbedPlayer instanceof ServerPlayer serverPlayer) {
+            serverPlayer.sendSystemMessage(Component.literal("§4Your " + armorName + " has been stolen!"));
+        }
+
+        // Announce to nearby players what boss stole
+        for (Player nearbyPlayer : this.level().getEntitiesOfClass(Player.class,
+                new AABB(this.getX() - 30, this.getY() - 30, this.getZ() - 30,
+                        this.getX() + 30, this.getY() + 30, this.getZ() + 30))) {
+            if (nearbyPlayer instanceof ServerPlayer serverPlayer && nearbyPlayer != grabbedPlayer) {
+                serverPlayer.sendSystemMessage(Component.literal("§6The boss has stolen " +
+                        grabbedPlayer.getName().getString() + "'s " + armorName + "!"));
+            }
+        }
+    }
+
+    // Get armor type name for announcements
+    private String getArmorTypeName(int slot) {
+        return switch (slot) {
+            case 0 -> "boots";
+            case 1 -> "leggings";
+            case 2 -> "chestplate";
+            case 3 -> "helmet";
+            default -> "armor";
+        };
+    }
+
+    // Equip stolen armor on boss if it's better than current
+    private void equipStolenArmor(net.minecraft.world.item.ItemStack stolenArmor, int armorSlot) {
+        if (stolenArmor.isEmpty()) return;
+
+        net.minecraft.world.entity.EquipmentSlot equipmentSlot = getEquipmentSlotForArmorSlot(armorSlot);
+
+        // Get current armor in that slot
+        net.minecraft.world.item.ItemStack currentArmor = this.getItemBySlot(equipmentSlot);
+
+        // Compare armor values (simplified comparison)
+        boolean shouldEquip = currentArmor.isEmpty() || getArmorValue(stolenArmor) > getArmorValue(currentArmor);
+
+        if (shouldEquip) {
+            // Drop current armor if any
+            if (!currentArmor.isEmpty()) {
+                this.spawnAtLocation(currentArmor);
+            }
+
+            // Force equip the stolen armor
+            this.setItemSlot(equipmentSlot, stolenArmor.copy());
+
+            // Play equip sound
+            this.playSound(SoundEvents.ARMOR_EQUIP_GENERIC.value(), 1.5F, 0.8F);
+
+            // Announce successful equipment
+            for (Player nearbyPlayer : this.level().getEntitiesOfClass(Player.class,
+                    new AABB(this.getX() - 30, this.getY() - 30, this.getZ() - 30,
+                            this.getX() + 30, this.getY() + 30, this.getZ() + 30))) {
+                if (nearbyPlayer instanceof ServerPlayer serverPlayer) {
+                    serverPlayer.sendSystemMessage(Component.literal("§4The boss equips the stolen " +
+                            getArmorTypeName(armorSlot) + "!"));
+                }
+            }
+        } else {
+            // Drop the stolen armor if it's not better
+            this.spawnAtLocation(stolenArmor);
+
+            // Announce that armor was discarded
+            for (Player nearbyPlayer : this.level().getEntitiesOfClass(Player.class,
+                    new AABB(this.getX() - 20, this.getY() - 20, this.getZ() - 20,
+                            this.getX() + 20, this.getY() + 20, this.getZ() + 20))) {
+                if (nearbyPlayer instanceof ServerPlayer serverPlayer) {
+                    serverPlayer.sendSystemMessage(Component.literal("§7The boss discards the weak " +
+                            getArmorTypeName(armorSlot) + "."));
+                }
+            }
+        }
+    }
+
+    // Convert armor slot index to EquipmentSlot
+    private net.minecraft.world.entity.EquipmentSlot getEquipmentSlotForArmorSlot(int armorSlot) {
+        return switch (armorSlot) {
+            case 0 -> net.minecraft.world.entity.EquipmentSlot.FEET;
+            case 1 -> net.minecraft.world.entity.EquipmentSlot.LEGS;
+            case 2 -> net.minecraft.world.entity.EquipmentSlot.CHEST;
+            case 3 -> net.minecraft.world.entity.EquipmentSlot.HEAD;
+            default -> net.minecraft.world.entity.EquipmentSlot.CHEST;
+        };
+    }
+
+    // Get armor protection value (enhanced)
+    private int getArmorValue(net.minecraft.world.item.ItemStack armor) {
+        if (armor.getItem() instanceof net.minecraft.world.item.ArmorItem armorItem) {
+            int baseDefense = armorItem.getDefense();
+            int enchantmentBonus = 0;
+
+            // Add enchantment bonuses to make enchanted armor more valuable
+            if (armor.isEnchanted()) {
+                enchantmentBonus = armor.getTagEnchantments().size() * 2; // Simple bonus for enchanted items
+            }
+
+            return baseDefense + enchantmentBonus;
+        }
+        return 0;
+    }
+
+    // Show visual effects when armor is stolen
+    private void createArmorStealEffect(ServerLevel serverLevel, net.minecraft.world.item.ItemStack stolenArmor) {
+        if (grabbedPlayer == null) return;
+
+        Vec3 playerPos = grabbedPlayer.position().add(0, 1, 0);
+        Vec3 bossPos = new Vec3(this.getX(), this.getY() + 1, this.getZ());
+
+        // Create trail of particles from player to boss
+        int trailSegments = 15;
+        for (int i = 0; i <= trailSegments; i++) {
+            double t = i / (double) trailSegments;
+            Vec3 trailPos = playerPos.lerp(bossPos, t);
+
+            // Add upward arc to the trail
+            double arc = Math.sin(t * Math.PI) * 2.0;
+            trailPos = trailPos.add(0, arc, 0);
+
+            serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                    trailPos.x, trailPos.y, trailPos.z, 3, 0.2, 0.2, 0.2, 0.1);
+
+//            // Add some item particles
+//            if (i % 3 == 0) {
+//                serverLevel.sendParticles(ParticleTypes.ITEM(),
+//                        trailPos.x, trailPos.y, trailPos.z, 2, 0.1, 0.1, 0.1, 0.05);
+//            }
+        }
+
+        // Explosion at boss when armor arrives
+        serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                bossPos.x, bossPos.y, bossPos.z, 20, 1.0, 1.0, 1.0, 0.2);
+    }
+
+    // End the grab sequence
+    private void endGrab(boolean completed) {
+        if (grabbedPlayer != null) {
+            // Give player brief immunity to fall damage
+            grabbedPlayer.addEffect(new MobEffectInstance(MobEffects.SLOW_FALLING, 100, 0));
+
+            if (completed) {
+                // Apply some damage and effects for being grabbed
+                grabbedPlayer.hurt(this.damageSources().mobAttack(this), 4.0F);
+                grabbedPlayer.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, 100, 1));
+                grabbedPlayer.addEffect(new MobEffectInstance(MobEffects.MOVEMENT_SLOWDOWN, 60, 2));
+            }
+
+            // Play release sound
+            this.playSound(SoundEvents.ENCHANTMENT_TABLE_USE, 1.0F, 1.5F);
+
+            if (grabbedPlayer instanceof ServerPlayer serverPlayer) {
+                serverPlayer.sendSystemMessage(Component.literal("§7You have been released from the boss's grasp."));
+            }
+        }
+
+        // Reset grab state
+        isGrabbingPlayer = false;
+        grabbedPlayer = null;
+        grabTimer = 0;
+        grabPosition = null;
+        armorStealCooldown = ARMOR_STEAL_COOLDOWN;
+    }
+
+    private void performArrowReflection() {
+        // Only reflect arrows when not in deactivated or building phases
+        if (this.state == PHASE.DEACTIVATED_IDOL || this.state == PHASE.ARENA_BUILDING) {
+            return;
+        }
+
+        // Find all arrows within reflection range
+        List<net.minecraft.world.entity.projectile.Arrow> arrowsInRange = this.level().getEntitiesOfClass(
+                net.minecraft.world.entity.projectile.Arrow.class,
+                new AABB(this.getX() - ARROW_REFLECTION_RANGE, this.getY() - ARROW_REFLECTION_RANGE, this.getZ() - ARROW_REFLECTION_RANGE,
+                        this.getX() + ARROW_REFLECTION_RANGE, this.getY() + ARROW_REFLECTION_RANGE, this.getZ() + ARROW_REFLECTION_RANGE));
+
+        for (net.minecraft.world.entity.projectile.Arrow arrow : arrowsInRange) {
+            // Only reflect arrows shot by players
+            if (arrow.getOwner() instanceof Player player && !player.isCreative() && !player.isSpectator()) {
+                reflectArrow(arrow, player);
+            }
+        }
+    }
+
+    // Method to reflect an individual arrow back at the player
+    private void reflectArrow(net.minecraft.world.entity.projectile.Arrow arrow, Player targetPlayer) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Calculate direction from boss to player
+        Vec3 bossPos = new Vec3(this.getX(), this.getY() + 1, this.getZ());
+        Vec3 playerPos = new Vec3(targetPlayer.getX(), targetPlayer.getY() + 1, targetPlayer.getZ());
+        Vec3 direction = playerPos.subtract(bossPos).normalize();
+
+        // Remove the original arrow
+        arrow.discard();
+
+        // Create a new arrow going towards the player
+        net.minecraft.world.entity.projectile.Arrow reflectedArrow = new net.minecraft.world.entity.projectile.Arrow(
+                net.minecraft.world.entity.EntityType.ARROW, this.level());
+
+        // Set arrow position near the boss
+        reflectedArrow.setPos(bossPos.x, bossPos.y, bossPos.z);
+
+        // Set the boss as the owner of the reflected arrow
+        reflectedArrow.setOwner(this);
+
+        // Set arrow velocity towards the player with increased speed
+        double reflectionSpeed = 2.5; // Faster than normal arrows
+        reflectedArrow.setDeltaMovement(direction.scale(reflectionSpeed));
+
+        // Make the arrow deal more damage
+        reflectedArrow.setBaseDamage(8.0); // Increased damage for reflected arrows
+
+        // Add the reflected arrow to the world
+        this.level().addFreshEntity(reflectedArrow);
+
+        // Create reflection visual effects
+        createArrowReflectionEffect(serverLevel, bossPos);
+
+        // Play reflection sound
+        this.playSound(SoundEvents.ENCHANTMENT_TABLE_USE, 1.5F, 1.2F);
+        this.playSound(SoundEvents.ARROW_SHOOT, 1.0F, 0.8F);
+    }
+
+    // Method to create visual effects for arrow reflection
+    private void createArrowReflectionEffect(ServerLevel serverLevel, Vec3 position) {
+        // Create magical barrier effect around the boss
+        for (int i = 0; i < 20; i++) {
+            double angle = (i / 20.0) * 2 * Math.PI;
+            double radius = 3.0;
+            double x = position.x + Math.cos(angle) * radius;
+            double z = position.z + Math.sin(angle) * radius;
+            double y = position.y + (Math.random() - 0.5) * 2.0;
+
+            serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                    x, y, z, 2, 0.1, 0.1, 0.1, 0.1);
+        }
+
+        // Create burst effect at boss center
+        serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                position.x, position.y, position.z, 15, 0.5, 0.5, 0.5, 0.2);
+
+        // Add some sparkle effects
+        for (int i = 0; i < 10; i++) {
+            double offsetX = (Math.random() - 0.5) * 4.0;
+            double offsetY = (Math.random() - 0.5) * 4.0;
+            double offsetZ = (Math.random() - 0.5) * 4.0;
+
+            serverLevel.sendParticles(ParticleTypes.END_ROD,
+                    position.x + offsetX, position.y + offsetY, position.z + offsetZ,
+                    1, 0, 0, 0, 0.05);
+        }
     }
 
     private void performGiantSpearAttack() {
@@ -688,7 +1193,6 @@ public class Radiance extends Monster {
         }
     }
 
-    // Also update the slamPlayer method to add more dramatic particles when the slam hits
     private void slamPlayer(Player player) {
         if (!player.isSpectator() && !player.isCreative()) {
             player.getAbilities().flying = false;
@@ -700,25 +1204,60 @@ public class Radiance extends Monster {
         player.setDeltaMovement(slamVelocity);
         player.hurtMarked = true;
 
+        // Check if player is using a shield before damage
+        boolean wasUsingShield = player.isUsingItem() &&
+                player.getUseItem().getItem() instanceof net.minecraft.world.item.ShieldItem;
+        net.minecraft.world.item.ItemStack shield = null;
+
+        if (wasUsingShield) {
+            shield = player.getUseItem().copy();
+
+            // Stop blocking
+            player.disableShield();
+
+            // Play shield break sound
+            player.playSound(SoundEvents.SHIELD_BREAK, 1.0F, 1.0F);
+
+            // Damage the shield significantly
+            net.minecraft.world.entity.EquipmentSlot shieldSlot = player.getUsedItemHand() == InteractionHand.MAIN_HAND ?
+                    net.minecraft.world.entity.EquipmentSlot.MAINHAND :
+                    net.minecraft.world.entity.EquipmentSlot.OFFHAND;
+            shield.hurtAndBreak(250, player, shieldSlot);
+
+            // Put shield on cooldown
+            player.getCooldowns().addCooldown(shield.getItem(), 200); // 10 second cooldown
+        }
+
         // Calculate damage based on armor
         float armorValue = player.getArmorValue();
         float armorToughness = (float) player.getAttributeValue(Attributes.ARMOR_TOUGHNESS);
         float baseDamage = 6.0F;
-        float armorBasedDamage = baseDamage + (armorValue * 0.5F) + (armorToughness * 0.75F);
+        float finalDamage = baseDamage + (armorValue * 0.5F) + (armorToughness * 0.75F);
 
-        // Deal damage
-        player.hurt(this.damageSources().mobAttack(this), armorBasedDamage);
+        // Bonus damage if they tried to block
+        if (wasUsingShield) {
+            finalDamage += 3.0F; // Extra damage for attempting to block divine wrath
+        }
 
-        // Apply debuff effects
-        int effectDuration = 40;
-        int slownessDuration = 30;
+        // Deal the damage (shield is already broken/disabled)
+        player.hurt(this.damageSources().mobAttack(this), finalDamage);
+
+        // Apply debuff effects (stronger if they tried to block)
+        int effectDuration = wasUsingShield ? 60 : 40;
+        int slownessDuration = wasUsingShield ? 50 : 30;
+        int weaknessLevel = wasUsingShield ? 2 : 1;
 
         player.addEffect(new MobEffectInstance(MobEffects.MOVEMENT_SLOWDOWN, slownessDuration, 2));
-        player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, effectDuration, 200));
+        player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, effectDuration, weaknessLevel));
+
+        if (wasUsingShield) {
+            // Additional punishment for trying to block divine power
+            player.addEffect(new MobEffectInstance(MobEffects.DIG_SLOWDOWN, 60, 1));
+        }
 
         // Play slam sound with more impact
-        this.playSound(SoundEvents.ANVIL_LAND, 2.0F, 0.5F); // Louder and deeper
-        player.playSound(SoundEvents.DRAGON_FIREBALL_EXPLODE, 1.5F, 0.8F); // Additional explosion sound
+        this.playSound(SoundEvents.ANVIL_LAND, 2.0F, 0.5F);
+        player.playSound(SoundEvents.DRAGON_FIREBALL_EXPLODE, 1.5F, 0.8F);
 
         // Enhanced particle effects for the actual slam
         if (this.level() instanceof ServerLevel serverLevel) {
@@ -734,12 +1273,29 @@ public class Radiance extends Monster {
                 }
             }
 
-            // Create massive hand slam impact effect
+            // Create massive hand slam impact effect (enhanced if shield was broken)
             createSlamImpactEffect(serverLevel, player.getX(), groundY, player.getZ());
+
+            if (wasUsingShield) {
+                // Extra dramatic effects for shield breaking
+                createShieldBreakEffect(serverLevel, player.getX(), player.getY() + 1, player.getZ());
+            }
         }
 
         player.playSound(SoundEvents.PLAYER_HURT, 1.0F, 1.0F);
     }
+
+    // Add visual effect for shield breaking
+    private void createShieldBreakEffect(ServerLevel serverLevel, double x, double y, double z) {
+        // Explosion of shield particles
+        serverLevel.sendParticles(ParticleTypes.CRIT,
+                x, y, z, 20, 1.0, 1.0, 1.0, 0.3);
+
+        // Angry particles to show divine wrath
+        serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
+                x, y, z, 10, 0.5, 0.5, 0.5, 0);
+    }
+
 
     // Add this method for the dramatic slam impact effect
     private void createSlamImpactEffect(ServerLevel serverLevel, double centerX, double groundY, double centerZ) {
@@ -920,6 +1476,12 @@ public class Radiance extends Monster {
         tag.putInt("BlockExplosionCooldown", this.blockExplosionCooldown);
         tag.putBoolean("IsBlockExplosionActive", this.isBlockExplosionActive);
         tag.putInt("BlockExplosionTimer", this.blockExplosionTimer);
+
+        // steal data
+
+        tag.putInt("ArmorStealCooldown", this.armorStealCooldown);
+        tag.putBoolean("IsGrabbingPlayer", this.isGrabbingPlayer);
+        tag.putInt("GrabTimer", this.grabTimer);
     }
 
     // Update the readAdditionalSaveData method to load the new fields:
@@ -947,6 +1509,8 @@ public class Radiance extends Monster {
         if (tag.contains("IsWindingUp")) {
             this.isWindingUp = tag.getBoolean("IsWindingUp");
         }
+
+        // spear attack
         if (tag.contains("SpearAttackTimer")) {
             this.spearAttackTimer = tag.getInt("SpearAttackTimer");
         }
@@ -957,6 +1521,7 @@ public class Radiance extends Monster {
             this.isSpearAttackActive = tag.getBoolean("IsSpearAttackActive");
         }
 
+        // block explosion
         if (tag.contains("BlockExplosionCooldown")) {
             this.blockExplosionCooldown = tag.getInt("BlockExplosionCooldown");
         }
@@ -965,6 +1530,17 @@ public class Radiance extends Monster {
         }
         if (tag.contains("BlockExplosionTimer")) {
             this.blockExplosionTimer = tag.getInt("BlockExplosionTimer");
+        }
+
+        // steal
+        if (tag.contains("ArmorStealCooldown")) {
+            this.armorStealCooldown = tag.getInt("ArmorStealCooldown");
+        }
+        if (tag.contains("IsGrabbingPlayer")) {
+            this.isGrabbingPlayer = tag.getBoolean("IsGrabbingPlayer");
+        }
+        if (tag.contains("GrabTimer")) {
+            this.grabTimer = tag.getInt("GrabTimer");
         }
     }
 
