@@ -293,7 +293,7 @@ public class Radiance extends Monster {
             }
 
             // armor steal attack IF KNOCKBACK IS ON COOLDOWN
-            if (knockbackCooldownTimer > 1 && knockbackCooldownTimer < KNOCKBACK_COOLDOWN - 20*3) // only attack if knockback is on cooldown AFTER 3 seconds.
+            if (knockbackCooldownTimer > 1 && knockbackCooldownTimer < KNOCKBACK_COOLDOWN - 20*4 && !this.hasEffect(MobEffects.WEAKNESS)) // only attack if knockback is on cooldown AFTER 4 seconds AND does not have weakness.
                 performArmorStealAttack();
         }
 
@@ -367,6 +367,27 @@ public class Radiance extends Monster {
 
     // Handle the active grab sequence
     private void handleActiveGrab() {
+
+        if (this.hasEffect(MobEffects.WEAKNESS)) {
+            // Steal armor immediately if we haven't already (at halfway point)
+            if (grabTimer < GRAB_DURATION / 2) {
+                stealArmorFromPlayer();
+
+                // Announce early armor steal due to weakness
+                if (grabbedPlayer instanceof ServerPlayer serverPlayer) {
+                    serverPlayer.sendSystemMessage(Component.literal("§6The boss's weakness causes it to hastily steal your armor!"));
+                }
+            }
+
+            // Drop the player immediately
+            endGrab(false); // false = interrupted, not completed normally
+
+            // Play weakness sound
+            this.playSound(SoundEvents.ENCHANTMENT_TABLE_USE, 1.0F, 0.8F);
+
+            return;
+        }
+
         grabTimer++;
 
         if (grabbedPlayer == null || grabbedPlayer.isRemoved() || grabbedPlayer.isCreative()) {
