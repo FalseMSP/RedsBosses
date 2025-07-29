@@ -288,7 +288,7 @@ public class Radiance extends Monster {
             performBlockExplosionAttack();
 
             // reflect arrows if not using knockback attack and spears are not up
-            if (!isWindingUp && !isChargingKnockback && !isSpearAttackActive) {
+            if (!isWindingUp && !isChargingKnockback && !isSpearAttackActive && !isGrabbingPlayer) {
                 performArrowReflection();
             }
 
