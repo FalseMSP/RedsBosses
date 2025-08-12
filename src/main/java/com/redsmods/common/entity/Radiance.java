@@ -363,7 +363,7 @@ public class Radiance extends Monster {
             performSkyTransition();
         } else if (this.state == PHASE.ARENA_BUILDING_2) {
             if (arenaBuilder2 == null)
-                arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4+6,230-35,getBlockZ()+1-3+6),"/arena2.schem",600); // 30 second building
+                arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4-6,230-35,getBlockZ()+1-3-6),"/arena2.schem",600); // 30 second building
             if (arenaBuilder2.tick()) {
                 this.state = PHASE.RADIANCE;
             }
