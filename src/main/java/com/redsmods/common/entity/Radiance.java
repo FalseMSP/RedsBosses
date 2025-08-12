@@ -40,6 +40,7 @@ enum PHASE {
     ARENA_BUILDING,
     ACTIVATED_IDOL,
     TRANSITION_TO_RADIANCE,
+    ARENA_BUILDING_2,
     RADIANCE,
     TRANSITION_TO_TRUE,
     TRUE_RADIANCE
@@ -47,6 +48,7 @@ enum PHASE {
 
 public class Radiance extends Monster {
     private SpiralStructureBuilder arenaBuilder;
+    private SpiralStructureBuilder arenaBuilder2;
     private float floatTimer = 0.0F;
     private double groundY = -1; // Store the ground level
     private PHASE state = PHASE.DEACTIVATED_IDOL;
@@ -115,6 +117,45 @@ public class Radiance extends Monster {
     private Player grabbedPlayer = null;
     private int grabTimer = 0;
     private Vec3 grabPosition = null;
+
+    // Sky Transition
+    private static final int SKY_TRANSITION_DURATION = 20* 5; // 5 seconds to reach sky
+    private static final double TARGET_SKY_Y = 230.0;
+    private static final int EXPLOSION_RADIUS = 50; // Radius of the massive explosion
+    private int skyTransitionTimer = 0;
+    private boolean isSkyTransitionActive = false;
+    private double skyTransitionStartY = -1;
+    private boolean hasCreatedMassiveExplosion = false;
+
+    // Light Beam Attack Fields
+    private int lightBeamAttackTimer = 0;
+    private static final int LIGHT_BEAM_WARNING_TIME = 60; // 3 seconds warning
+    private static final int LIGHT_BEAM_DURATION = 40; // 2 seconds of beams
+    private static final int LIGHT_BEAM_COOLDOWN = 20 * 18; // 18 second cooldown
+    private int lightBeamCooldown = 0;
+    private boolean isLightBeamActive = false;
+    private final Map<BlockPos, Integer> lightBeamPositions = new HashMap<>();
+    private static final int LIGHT_BEAM_HEIGHT = 100; // How far down the beams go
+
+    // Orbital Light Orbs Fields
+    private int orbitalAttackTimer = 0;
+    private static final int ORBITAL_ATTACK_DURATION = 20 * 12; // 12 seconds of orbital attack
+    private static final int ORBITAL_ATTACK_COOLDOWN = 20 * 22; // 22 second cooldown
+    private int orbitalAttackCooldown = 0;
+    private boolean isOrbitalAttackActive = false;
+    private final List<OrbitalLightOrb> lightOrbs = new ArrayList<>();
+    private static final int NUM_LIGHT_ORBS = 8;
+    private static final double ORBITAL_RADIUS = 12.0;
+    private static final double ORB_SPEED = 0.1; // Radians per tick
+
+    // Radiant Burst Fields (area denial)
+    private int radiantBurstTimer = 0;
+    private static final int RADIANT_BURST_WARNING = 40; // 2 seconds warning
+    private static final int RADIANT_BURST_DURATION = 80; // 4 seconds active
+    private static final int RADIANT_BURST_COOLDOWN = 20 * 20; // 20 second cooldown
+    private int radiantBurstCooldown = 0;
+    private boolean isRadiantBurstActive = false;
+    private final Set<BlockPos> radiantBurstZones = new HashSet<>();
 
 
     public Radiance(EntityType<? extends Monster> entityType, Level level) {
@@ -228,6 +269,26 @@ public class Radiance extends Monster {
     }
 
     @Override
+    public boolean removeWhenFarAway(double distanceToClosestPlayer) {
+        return false;
+    }
+
+    @Override
+    public boolean requiresCustomPersistence() {
+        return true;
+    }
+
+    @Override
+    public boolean isPersistenceRequired() {
+        return true;
+    }
+
+    @Override
+    public void checkDespawn() {
+
+    }
+
+    @Override
     public InteractionResult mobInteract(Player player, InteractionHand hand) {
         if (!this.level().isClientSide) {
             if (player.getItemInHand(hand).is(Items.STRUCTURE_VOID) && this.state == PHASE.DEACTIVATED_IDOL) {
@@ -295,6 +356,21 @@ public class Radiance extends Monster {
             // armor steal attack IF KNOCKBACK IS ON COOLDOWN
             if (knockbackCooldownTimer > 1 && knockbackCooldownTimer < KNOCKBACK_COOLDOWN - 20*4 && !this.hasEffect(MobEffects.WEAKNESS)) // only attack if knockback is on cooldown AFTER 4 seconds AND does not have weakness.
                 performArmorStealAttack();
+        } else if (this.state == PHASE.TRANSITION_TO_RADIANCE) {
+            performSkyTransition();
+        } else if (this.state == PHASE.ARENA_BUILDING_2) {
+            if (arenaBuilder2 == null)
+                arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4+6,230-50,getBlockZ()+1-3+6),"/arena2.schem",300); // 15 second building
+            if (arenaBuilder2.tick()) {
+                this.state = PHASE.RADIANCE;
+            }
+            this.moveTo(this.getX(), 230-9, this.getZ());
+        } else if (this.state == PHASE.RADIANCE) {
+            performLightBeamAttack();
+
+            performOrbitalLightAttack();
+
+            performRadiantBurstAttack();
         }
 
         // Break blocks within hitbox
@@ -302,6 +378,411 @@ public class Radiance extends Monster {
 
         // Update boss bar
         updateBossBar();
+    }
+
+    private void performSkyTransition() {
+        if (!isSkyTransitionActive) {
+            startSkyTransition();
+            return;
+        }
+
+        skyTransitionTimer++;
+
+        // Calculate progress (0.0 to 1.0)
+        float progress = Math.min(1.0f, (float) skyTransitionTimer / SKY_TRANSITION_DURATION);
+
+        // Move boss upward
+        moveBossToSky(progress);
+
+        // Show transition effects
+        showSkyTransitionEffects(progress);
+
+        // Check if we've reached the sky
+        if (progress >= 1.0f && !hasCreatedMassiveExplosion) {
+            createMassiveSkyExplosion();
+            hasCreatedMassiveExplosion = true;
+
+            // Reset transition state immediately after explosion
+            isSkyTransitionActive = false;
+            skyTransitionTimer = 0;
+
+            // Keep boss at sky level
+            this.setPos(this.getX(), TARGET_SKY_Y, this.getZ());
+        }
+    }
+
+    private void startSkyTransition() {
+        isSkyTransitionActive = true;
+        skyTransitionTimer = 0;
+        skyTransitionStartY = this.getY();
+        hasCreatedMassiveExplosion = false;
+
+        // Disable gravity for smooth flight
+        this.setNoGravity(true);
+
+        // Play dramatic ascension sound
+        this.playSound(SoundEvents.BEACON_POWER_SELECT, 3.0F, 0.3F);
+        this.playSound(SoundEvents.WITHER_SPAWN, 2.0F, 0.8F);
+
+        // Announce to all players in range
+        announceToPlayers("§6The Radiance begins to ascend to the heavens!");
+    }
+
+    private void moveBossToSky(float progress) {
+        // Smooth interpolation from start Y to target Y
+        double currentY = skyTransitionStartY + (TARGET_SKY_Y - skyTransitionStartY) * progress;
+
+        // Add some floating motion for dramatic effect
+        double floatOffset = Math.sin(skyTransitionTimer * 0.1) * 2.0 * progress;
+
+        this.setPos(this.getX(), currentY + floatOffset, this.getZ());
+
+        // Prevent any downward movement
+        this.setDeltaMovement(0, Math.max(0, this.getDeltaMovement().y), 0);
+    }
+
+    private void showSkyTransitionEffects(float progress) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Ascending spiral of particles around the boss
+        for (int i = 0; i < 8; i++) {
+            double angle = (skyTransitionTimer * 0.2) + (i * 0.785); // 45 degrees apart
+            double radius = 4.0 + Math.sin(skyTransitionTimer * 0.1 + i) * 1.0;
+            double x = this.getX() + Math.cos(angle) * radius;
+            double z = this.getZ() + Math.sin(angle) * radius;
+            double y = this.getY() + (Math.random() - 0.5) * 6.0;
+
+            SimpleParticleType particleType = progress > 0.8f ? ParticleTypes.SOUL_FIRE_FLAME :
+                    progress > 0.5f ? ParticleTypes.END_ROD : ParticleTypes.ENCHANTED_HIT;
+
+            serverLevel.sendParticles(particleType, x, y, z, 1, 0, 0.5, 0, 0.1);
+        }
+
+        // Create ascending beam of light
+        double beamHeight = 20.0 * progress;
+        for (int i = 0; i < beamHeight; i += 2) {
+            double beamY = this.getY() - beamHeight + i;
+
+            // Multiple beams for thickness
+            for (int beam = 0; beam < 3; beam++) {
+                double beamRadius = 0.5 + beam * 0.3;
+                for (int p = 0; p < 4; p++) {
+                    double beamAngle = (p / 4.0) * 2 * Math.PI;
+                    double beamX = this.getX() + Math.cos(beamAngle) * beamRadius;
+                    double beamZ = this.getZ() + Math.sin(beamAngle) * beamRadius;
+
+                    serverLevel.sendParticles(ParticleTypes.END_ROD,
+                            beamX, beamY, beamZ, 1, 0, 0, 0, 0);
+                }
+            }
+        }
+
+        // Intensifying sound effects
+        if (skyTransitionTimer % 40 == 0) { // Every 2 seconds
+            float pitch = 0.5f + (progress * 1.0f);
+            this.playSound(SoundEvents.BEACON_AMBIENT, 2.0f + progress, pitch);
+        }
+
+        // Warning sounds as we approach the explosion
+        if (progress > 0.8f && skyTransitionTimer % 20 == 0) {
+            this.playSound(SoundEvents.NOTE_BLOCK_PLING.value(), 3.0f, 2.0f);
+        }
+    }
+
+    private void createPlayerLevitationEffect(ServerLevel serverLevel, Player player) {
+        // Upward spiral around player
+        for (int i = 0; i < 6; i++) {
+            double angle = (skyTransitionTimer * 0.3) + (i * 1.047); // 60 degrees apart
+            double radius = 1.5;
+            double x = player.getX() + Math.cos(angle) * radius;
+            double z = player.getZ() + Math.sin(angle) * radius;
+            double y = player.getY() + Math.random() * 3.0;
+
+            serverLevel.sendParticles(ParticleTypes.END_ROD, x, y, z, 1, 0, 0.2, 0, 0.05);
+        }
+
+        // Upward flowing particles
+        for (int i = 0; i < 3; i++) {
+            double offsetX = (Math.random() - 0.5) * 2.0;
+            double offsetZ = (Math.random() - 0.5) * 2.0;
+
+            serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                    player.getX() + offsetX, player.getY(), player.getZ() + offsetZ,
+                    1, 0, 1.0, 0, 0.3);
+        }
+    }
+
+    private void createMassiveSkyExplosion() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Play massive explosion sounds
+        this.playSound(SoundEvents.DRAGON_FIREBALL_EXPLODE, 5.0F, 0.2F);
+        this.playSound(SoundEvents.LIGHTNING_BOLT_THUNDER, 4.0F, 0.5F);
+
+        // Create the massive chasm with explosive effects
+        createSkyHole(serverLevel);
+
+        // Create dramatic explosion effects
+        createExplosionEffects(serverLevel);
+
+        // Create the explosive chasm drilling effect
+        createChasmDrillingEffect(serverLevel);
+
+        // Damage and affect players
+        affectPlayersInExplosion();
+
+        // Announce the transformation
+        announceToPlayers("§4The heavens themselves tremble before the true power of Radiance!");
+
+        // Immediately transition to RADIANCE phase
+        this.state = PHASE.ARENA_BUILDING_2;
+    }
+
+    private void createSkyHole(ServerLevel serverLevel) {
+        BlockPos centerPos = this.blockPosition();
+
+        // Create a massive chasm that gets wider as it goes down
+        int maxDepth = (int) (TARGET_SKY_Y - groundY + 50); // Go deep below ground level
+
+        for (int y = 0; y >= -maxDepth; y--) {
+            // Calculate radius - gets bigger as we go down, creating a chasm effect
+            double depthProgress = Math.abs(y) / (double) maxDepth;
+            double currentRadius = EXPLOSION_RADIUS * (0.3 + depthProgress * 1.5); // Start small, get huge
+
+            // Create expanding explosion effects as we go down
+            if (y % 10 == 0) { // Every 10 blocks down, create explosion effects
+                createChasmExplosionRing(serverLevel, centerPos.offset(0, y, 0), currentRadius);
+            }
+
+            // Destroy blocks in a circular pattern at this Y level
+            for (int x = -(int)currentRadius - 5; x <= (int)currentRadius + 5; x++) {
+                for (int z = -(int)currentRadius - 5; z <= (int)currentRadius + 5; z++) {
+                    double distance = Math.sqrt(x*x + z*z);
+
+                    if (distance <= currentRadius) {
+                        BlockPos pos = centerPos.offset(x, y, z);
+                        BlockState state = serverLevel.getBlockState(pos);
+
+                        // Don't destroy bedrock
+                        if (!state.is(Blocks.BEDROCK)) {
+                            // Calculate destroy chance - more aggressive destruction
+                            double destroyChance = 1.0 - (distance / currentRadius) * 0.2;
+
+                            // Add some randomness for more natural chasm walls
+                            destroyChance += (Math.random() - 0.5) * 0.3;
+                            destroyChance = Math.max(0.0, Math.min(1.0, destroyChance));
+
+                            if (Math.random() < destroyChance) {
+                                serverLevel.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
+
+                                // Create explosion particles at destroyed blocks
+                                if (Math.random() < 0.1) { // 10% chance for particles
+                                    serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                                            pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
+                                            1, 0, 0, 0, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void createExplosionEffects(ServerLevel serverLevel) {
+        Vec3 explosionCenter = new Vec3(this.getX(), this.getY(), this.getZ());
+
+        // Massive explosion particles at center
+        serverLevel.sendParticles(ParticleTypes.EXPLOSION_EMITTER,
+                explosionCenter.x, explosionCenter.y, explosionCenter.z, 20, 5, 5, 5, 0);
+
+        // Multiple expanding shockwave rings
+        for (int ring = 0; ring < 8; ring++) {
+            double radius = 5.0 + (ring * 4.0);
+            int particlesPerRing = (int) (radius * 6);
+
+            for (int i = 0; i < particlesPerRing; i++) {
+                double angle = (i / (double) particlesPerRing) * 2 * Math.PI;
+
+                // Horizontal ring
+                double x = explosionCenter.x + Math.cos(angle) * radius;
+                double z = explosionCenter.z + Math.sin(angle) * radius;
+                serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                        x, explosionCenter.y, z, 3, 0.5, 0.5, 0.5, 0.2);
+
+                // Vertical rings
+                double y = explosionCenter.y + Math.cos(angle) * radius;
+                serverLevel.sendParticles(ParticleTypes.FLAME,
+                        explosionCenter.x, y, explosionCenter.z + Math.sin(angle) * radius,
+                        2, 0.3, 0.3, 0.3, 0.1);
+            }
+        }
+
+        // Debris and energy bursts in all directions
+        for (int i = 0; i < 100; i++) {
+            double angle1 = Math.random() * 2 * Math.PI;
+            double angle2 = Math.random() * Math.PI;
+            double distance = EXPLOSION_RADIUS * (0.5 + Math.random() * 0.5);
+
+            double x = explosionCenter.x + Math.cos(angle1) * Math.sin(angle2) * distance;
+            double y = explosionCenter.y + Math.cos(angle2) * distance;
+            double z = explosionCenter.z + Math.sin(angle1) * Math.sin(angle2) * distance;
+
+            serverLevel.sendParticles(ParticleTypes.LAVA,
+                    x, y, z, 1, 0, 0, 0, 0.5);
+
+            if (i % 3 == 0) {
+                serverLevel.sendParticles(ParticleTypes.LARGE_SMOKE,
+                        x, y, z, 2, 1.0, 1.0, 1.0, 0.3);
+            }
+        }
+    }
+
+    private void affectPlayersInExplosion() {
+        double explosionRange = EXPLOSION_RADIUS * 1.5;
+
+        for (Player player : this.level().getEntitiesOfClass(Player.class,
+                new AABB(this.getX() - explosionRange, this.getY() - explosionRange, this.getZ() - explosionRange,
+                        this.getX() + explosionRange, this.getY() + explosionRange, this.getZ() + explosionRange))) {
+
+            if (player.isCreative() || player.isSpectator()) continue;
+
+            double distance = player.distanceTo(this);
+            double maxDistance = explosionRange;
+            double distanceMultiplier = Math.max(0.2, 1.0 - (distance / maxDistance));
+
+            // Deal massive damage
+            float baseDamage = 15.0F;
+            float actualDamage = (float) (baseDamage * distanceMultiplier);
+            player.hurt(this.damageSources().explosion(this, this), actualDamage);
+
+            // Apply powerful effects
+            player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, 100, 0));
+            player.addEffect(new MobEffectInstance(MobEffects.CONFUSION, 200, 1));
+            player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, 150, 2));
+            player.addEffect(new MobEffectInstance(MobEffects.SLOW_FALLING, 200, 0)); // Prevent fall damage
+
+            // Dramatic knockback
+            Vec3 knockbackDirection = new Vec3(
+                    player.getX() - this.getX(),
+                    0.5,
+                    player.getZ() - this.getZ()
+            ).normalize();
+
+            double knockbackStrength = 3.0 * distanceMultiplier;
+            player.setDeltaMovement(knockbackDirection.scale(knockbackStrength));
+            player.hurtMarked = true;
+
+            // Individual player message
+            if (player instanceof ServerPlayer serverPlayer) {
+                serverPlayer.sendSystemMessage(Component.literal("§4You are overwhelmed by the divine transformation!"));
+            }
+        }
+    }
+
+// Add these new methods after createMassiveSkyExplosion():
+
+    private void createChasmExplosionRing(ServerLevel serverLevel, BlockPos center, double radius) {
+        // Create explosion ring effects at this depth level
+        int particles = (int) (radius * 3);
+
+        for (int i = 0; i < particles; i++) {
+            double angle = (i / (double) particles) * 2 * Math.PI;
+            double x = center.getX() + Math.cos(angle) * radius;
+            double z = center.getZ() + Math.sin(angle) * radius;
+            double y = center.getY();
+
+            // Different particle types based on depth
+            SimpleParticleType particleType;
+            if (y > TARGET_SKY_Y - 20) {
+                particleType = ParticleTypes.SOUL_FIRE_FLAME; // Sky level - divine fire
+            } else if (y > groundY) {
+                particleType = ParticleTypes.FLAME; // Above ground - regular fire
+            } else if (y > groundY - 30) {
+                particleType = ParticleTypes.LARGE_SMOKE; // Underground - smoke and debris
+            } else {
+                particleType = ParticleTypes.LAVA; // Deep underground - molten rock
+            }
+
+            serverLevel.sendParticles(particleType, x, y, z, 2, 0.5, 0.5, 0.5, 0.1);
+
+            // Add some upward shooting particles for dramatic effect
+            if (Math.random() < 0.3) {
+                serverLevel.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                        x, y, z, 1, 0, 2.0, 0, 0.5);
+            }
+        }
+
+        // Central explosion burst at this level
+        serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5,
+                3, radius * 0.1, 0.5, radius * 0.1, 0);
+    }
+
+    private void createChasmDrillingEffect(ServerLevel serverLevel) {
+        Vec3 explosionCenter = new Vec3(this.getX(), this.getY(), this.getZ());
+        int maxDepth = (int) (TARGET_SKY_Y - groundY + 50);
+
+        // Create dramatic drilling beam effect going downward
+        for (int depth = 0; depth < maxDepth; depth += 5) {
+            double currentY = explosionCenter.y - depth;
+            double beamRadius = 2.0 + (depth / 50.0) * 8.0; // Expanding beam
+
+            // Create circular beam cross-section
+            for (int i = 0; i < 16; i++) {
+                double angle = (i / 16.0) * 2 * Math.PI;
+                double x = explosionCenter.x + Math.cos(angle) * beamRadius;
+                double z = explosionCenter.z + Math.sin(angle) * beamRadius;
+
+                // Different effects based on depth
+                if (currentY > groundY) {
+                    // Above ground - divine energy
+                    serverLevel.sendParticles(ParticleTypes.END_ROD,
+                            x, currentY, z, 2, 0.1, 0.1, 0.1, 0.05);
+                } else {
+                    // Underground - destructive force
+                    serverLevel.sendParticles(ParticleTypes.LAVA,
+                            x, currentY, z, 1, 0.2, 0.2, 0.2, 0.1);
+                }
+            }
+
+            // Central drilling beam
+            serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                    explosionCenter.x, currentY, explosionCenter.z, 5, 1.0, 0.5, 1.0, 0.3);
+        }
+
+        // Create massive upward explosion from the bottom of the chasm
+        double bottomY = explosionCenter.y - maxDepth;
+
+        // Upward eruption effect
+        for (int i = 0; i < 100; i++) {
+            double angle = Math.random() * 2 * Math.PI;
+            double radius = Math.random() * (EXPLOSION_RADIUS * 2);
+            double x = explosionCenter.x + Math.cos(angle) * radius;
+            double z = explosionCenter.z + Math.sin(angle) * radius;
+
+            serverLevel.sendParticles(ParticleTypes.LAVA,
+                    x, bottomY, z, 3, 0, maxDepth * 0.1, 0, 0.8);
+
+            if (i % 5 == 0) {
+                serverLevel.sendParticles(ParticleTypes.LARGE_SMOKE,
+                        x, bottomY + 10, z, 2, radius * 0.1, maxDepth * 0.05, radius * 0.1, 0.4);
+            }
+        }
+
+        // Sound effects for the drilling
+        this.playSound(SoundEvents.FIRE_EXTINGUISH, 3.0F, 0.1F); // Deep rumbling
+        this.playSound(SoundEvents.LAVA_POP, 4.0F, 0.3F); // Molten rock sounds
+    }
+
+    private void announceToPlayers(String message) {
+        for (Player player : this.level().getEntitiesOfClass(Player.class,
+                new AABB(this.getX() - 100, this.getY() - 100, this.getZ() - 100,
+                        this.getX() + 100, this.getY() + 100, this.getZ() + 100))) {
+            if (player instanceof ServerPlayer serverPlayer) {
+                serverPlayer.sendSystemMessage(Component.literal(message));
+            }
+        }
     }
 
     // Add this method to handle the armor stealing attack
@@ -1426,6 +1907,7 @@ public class Radiance extends Monster {
             String phaseName = switch (this.state) {
                 case ACTIVATED_IDOL -> "The Idol";
                 case TRANSITION_TO_RADIANCE -> "???";
+                case ARENA_BUILDING_2 -> "????";
                 case RADIANCE -> "Radiance";
                 case TRANSITION_TO_TRUE -> "?????";
                 case TRUE_RADIANCE -> "True Radiance";
@@ -1499,13 +1981,17 @@ public class Radiance extends Monster {
         tag.putInt("BlockExplosionTimer", this.blockExplosionTimer);
 
         // steal data
-
         tag.putInt("ArmorStealCooldown", this.armorStealCooldown);
         tag.putBoolean("IsGrabbingPlayer", this.isGrabbingPlayer);
         tag.putInt("GrabTimer", this.grabTimer);
+
+        // sky transition
+        tag.putInt("SkyTransitionTimer", this.skyTransitionTimer);
+        tag.putBoolean("IsSkyTransitionActive", this.isSkyTransitionActive);
+        tag.putDouble("SkyTransitionStartY", this.skyTransitionStartY);
+        tag.putBoolean("HasCreatedMassiveExplosion", this.hasCreatedMassiveExplosion);
     }
 
-    // Update the readAdditionalSaveData method to load the new fields:
     @Override
     public void readAdditionalSaveData(CompoundTag tag) {
         super.readAdditionalSaveData(tag);
@@ -1562,6 +2048,20 @@ public class Radiance extends Monster {
         }
         if (tag.contains("GrabTimer")) {
             this.grabTimer = tag.getInt("GrabTimer");
+        }
+
+        // sky thing
+        if (tag.contains("SkyTransitionTimer")) {
+            this.skyTransitionTimer = tag.getInt("SkyTransitionTimer");
+        }
+        if (tag.contains("IsSkyTransitionActive")) {
+            this.isSkyTransitionActive = tag.getBoolean("IsSkyTransitionActive");
+        }
+        if (tag.contains("SkyTransitionStartY")) {
+            this.skyTransitionStartY = tag.getDouble("SkyTransitionStartY");
+        }
+        if (tag.contains("HasCreatedMassiveExplosion")) {
+            this.hasCreatedMassiveExplosion = tag.getBoolean("HasCreatedMassiveExplosion");
         }
     }
 
@@ -2191,6 +2691,687 @@ public class Radiance extends Monster {
                 player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, 20, 0));
             }
         }
+    }
+
+    private static class OrbitalLightOrb {
+        public double angle;
+        public double radius;
+        public double height;
+        public int life;
+        public boolean isDescending;
+
+        public OrbitalLightOrb(double angle, double radius, double height) {
+            this.angle = angle;
+            this.radius = radius;
+            this.height = height;
+            this.life = 0;
+            this.isDescending = false;
+        }
+
+        public Vec3 getPosition(double centerX, double centerY, double centerZ) {
+            double x = centerX + Math.cos(angle) * radius;
+            double z = centerZ + Math.sin(angle) * radius;
+            double y = centerY + height;
+            return new Vec3(x, y, z);
+        }
+    }
+
+    private void performLightBeamAttack() {
+        // Handle cooldown
+        if (lightBeamCooldown > 0) {
+            lightBeamCooldown--;
+            return;
+        }
+
+        // Find players to target
+        List<Player> playersInRange = this.level().getEntitiesOfClass(Player.class,
+                        new AABB(this.getX() - 60, this.getY() - 50, this.getZ() - 60,
+                                this.getX() + 60, this.getY() + 50, this.getZ() + 60))
+                .stream()
+                .filter(player -> !player.isCreative() && !player.isSpectator())
+                .collect(Collectors.toList());
+
+        if (playersInRange.isEmpty()) return;
+
+        // Start attack if not active
+        if (!isLightBeamActive) {
+            startLightBeamAttack(playersInRange);
+            return;
+        }
+
+        // Handle active attack
+        lightBeamAttackTimer++;
+
+        if (lightBeamAttackTimer <= LIGHT_BEAM_WARNING_TIME) {
+            showLightBeamWarning();
+        } else if (lightBeamAttackTimer <= LIGHT_BEAM_WARNING_TIME + LIGHT_BEAM_DURATION) {
+            executeLightBeams();
+        } else {
+            endLightBeamAttack();
+        }
+    }
+
+    private void startLightBeamAttack(List<Player> players) {
+        isLightBeamActive = true;
+        lightBeamAttackTimer = 0;
+        lightBeamPositions.clear();
+
+        // Play dramatic sky rumbling sound
+        this.playSound(SoundEvents.LIGHTNING_BOLT_THUNDER, 2.0F, 0.3F);
+
+        // Generate beam positions targeting players and random locations
+        for (Player player : players) {
+            // Target player's current position
+            BlockPos playerPos = player.blockPosition();
+            lightBeamPositions.put(playerPos, 0);
+
+            // Add some random positions around each player for area coverage
+            for (int i = 0; i < 3; i++) {
+                int offsetX = this.random.nextInt(21) - 10; // -10 to +10
+                int offsetZ = this.random.nextInt(21) - 10;
+                BlockPos randomPos = playerPos.offset(offsetX, 0, offsetZ);
+                lightBeamPositions.put(randomPos, 0);
+            }
+        }
+
+        // Add some completely random beam positions for chaos
+        BlockPos bossPos = this.blockPosition();
+        for (int i = 0; i < 8; i++) {
+            int offsetX = this.random.nextInt(101) - 50; // -50 to +50
+            int offsetZ = this.random.nextInt(101) - 50;
+            BlockPos randomPos = bossPos.offset(offsetX, 0, offsetZ);
+            lightBeamPositions.put(randomPos, 0);
+        }
+
+        // Announce attack
+        announceToPlayers("§6The heavens prepare to rain down divine judgment!");
+    }
+
+    private void showLightBeamWarning() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        float warningProgress = (float) lightBeamAttackTimer / LIGHT_BEAM_WARNING_TIME;
+
+        // Show warning indicators high in the sky above each beam position
+        for (BlockPos beamPos : lightBeamPositions.keySet()) {
+            double warningY = this.getY() + 30 + Math.sin(lightBeamAttackTimer * 0.2) * 2;
+
+            // Create warning light pillar
+            for (int i = 0; i < 10; i++) {
+                double offsetY = i * 2.0;
+                double intensity = warningProgress * (1.0 - (i / 10.0));
+
+                if (intensity > 0.1) {
+                    SimpleParticleType particleType = warningProgress > 0.8f ? ParticleTypes.SOUL_FIRE_FLAME :
+                            warningProgress > 0.5f ? ParticleTypes.END_ROD : ParticleTypes.ENCHANTED_HIT;
+
+                    serverLevel.sendParticles(particleType,
+                            beamPos.getX() + 0.5, warningY + offsetY, beamPos.getZ() + 0.5,
+                            (int)(intensity * 3 + 1), 0.2, 0.2, 0.2, 0.02);
+                }
+            }
+
+            // Ground warning circle
+            if (lightBeamAttackTimer % 10 == 0) {
+                double radius = 2.0;
+                int circleParticles = 16;
+
+                for (int i = 0; i < circleParticles; i++) {
+                    double angle = (i / (double) circleParticles) * 2 * Math.PI;
+                    double x = beamPos.getX() + 0.5 + Math.cos(angle) * radius;
+                    double z = beamPos.getZ() + 0.5 + Math.sin(angle) * radius;
+
+                    // Find ground level
+                    BlockPos groundPos = findGroundLevel(new BlockPos((int)x, beamPos.getY(), (int)z));
+                    if (groundPos != null) {
+                        serverLevel.sendParticles(ParticleTypes.END_ROD,
+                                x, groundPos.getY() + 0.1, z, 1, 0, 0, 0, 0);
+                    }
+                }
+            }
+        }
+
+        // Play escalating warning sounds
+        if (lightBeamAttackTimer % 15 == 0) {
+            float pitch = 0.5f + (warningProgress * 1.0f);
+            this.playSound(SoundEvents.NOTE_BLOCK_CHIME.value(), 1.5f, pitch);
+        }
+    }
+
+    private void executeLightBeams() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Create the light beams
+        for (BlockPos beamPos : lightBeamPositions.keySet()) {
+            createLightBeam(serverLevel, beamPos);
+
+            // Damage players in beam area
+            damagePlayersInLightBeam(beamPos);
+        }
+
+        // Play beam sound every few ticks
+        if (lightBeamAttackTimer % 10 == 0) {
+            this.playSound(SoundEvents.BEACON_POWER_SELECT, 2.0F, 1.5F);
+        }
+    }
+
+    private void createLightBeam(ServerLevel serverLevel, BlockPos beamCenter) {
+        // Find the highest point to start the beam
+        double startY = this.getY() + 50;
+
+        // Find ground level to end the beam
+        BlockPos groundPos = findGroundLevel(beamCenter);
+        double endY = groundPos != null ? groundPos.getY() : beamCenter.getY();
+
+        // Create the beam from sky to ground
+        double beamHeight = startY - endY;
+        int segments = (int) Math.max(10, beamHeight / 2);
+
+        for (int i = 0; i < segments; i++) {
+            double progress = i / (double) segments;
+            double currentY = startY - (beamHeight * progress);
+
+            // Main beam particles
+            serverLevel.sendParticles(ParticleTypes.END_ROD,
+                    beamCenter.getX() + 0.5, currentY, beamCenter.getZ() + 0.5,
+                    3, 0.1, 0, 0.1, 0.01);
+
+            // Wider beam effect
+            if (i % 2 == 0) {
+                for (int j = 0; j < 4; j++) {
+                    double angle = (j / 4.0) * 2 * Math.PI;
+                    double radius = 0.5;
+                    double x = beamCenter.getX() + 0.5 + Math.cos(angle) * radius;
+                    double z = beamCenter.getZ() + 0.5 + Math.sin(angle) * radius;
+
+                    serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                            x, currentY, z, 1, 0.05, 0, 0.05, 0.01);
+                }
+            }
+        }
+
+        // Ground impact effect
+        if (groundPos != null) {
+            serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                    beamCenter.getX() + 0.5, groundPos.getY() + 0.5, beamCenter.getZ() + 0.5,
+                    5, 0.5, 0.1, 0.5, 0.1);
+        }
+    }
+
+    private void damagePlayersInLightBeam(BlockPos beamCenter) {
+        double beamRadius = 1.5;
+
+        // Check all Y levels from sky to ground
+        BlockPos groundPos = findGroundLevel(beamCenter);
+        if (groundPos == null) return;
+
+        double startY = this.getY() + 50;
+        double endY = groundPos.getY();
+
+        for (Player player : this.level().getEntitiesOfClass(Player.class,
+                new AABB(beamCenter.getX() - beamRadius, endY, beamCenter.getZ() - beamRadius,
+                        beamCenter.getX() + beamRadius, startY, beamCenter.getZ() + beamRadius))) {
+
+            if (player.isCreative() || player.isSpectator()) continue;
+
+            double distanceFromBeam = Math.sqrt(
+                    Math.pow(player.getX() - (beamCenter.getX() + 0.5), 2) +
+                            Math.pow(player.getZ() - (beamCenter.getZ() + 0.5), 2)
+            );
+
+            if (distanceFromBeam <= beamRadius) {
+                // Deal high damage - this is a powerful attack
+                float damage = 8.0F;
+                player.hurt(this.damageSources().mobAttack(this), damage);
+
+                // Apply radiance effect
+                player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, 40, 0));
+                player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, 60, 1));
+
+                // Play damage sound
+                player.playSound(SoundEvents.LIGHTNING_BOLT_IMPACT, 1.0F, 1.5F);
+            }
+        }
+    }
+
+    private void endLightBeamAttack() {
+        isLightBeamActive = false;
+        lightBeamAttackTimer = 0;
+        lightBeamCooldown = LIGHT_BEAM_COOLDOWN;
+        lightBeamPositions.clear();
+
+        this.playSound(SoundEvents.LIGHTNING_BOLT_THUNDER, 1.0F, 2.0F);
+    }
+
+    private void performOrbitalLightAttack() {
+        // Handle cooldown
+        if (orbitalAttackCooldown > 0) {
+            orbitalAttackCooldown--;
+            return;
+        }
+
+        // Start attack if not active
+        if (!isOrbitalAttackActive) {
+            startOrbitalAttack();
+            return;
+        }
+
+        // Handle active attack
+        orbitalAttackTimer++;
+
+        // Update orb positions and effects
+        updateLightOrbs();
+
+        // End attack when duration is reached
+        if (orbitalAttackTimer >= ORBITAL_ATTACK_DURATION) {
+            endOrbitalAttack();
+        }
+    }
+
+    private void startOrbitalAttack() {
+        isOrbitalAttackActive = true;
+        orbitalAttackTimer = 0;
+        lightOrbs.clear();
+
+        // Create orbital light orbs around the boss
+        for (int i = 0; i < NUM_LIGHT_ORBS; i++) {
+            double angle = (i / (double) NUM_LIGHT_ORBS) * 2 * Math.PI;
+            double height = 8.0 + Math.random() * 4.0; // Vary heights slightly
+            lightOrbs.add(new OrbitalLightOrb(angle, ORBITAL_RADIUS, height));
+        }
+
+        this.playSound(SoundEvents.BEACON_POWER_SELECT, 2.0F, 0.8F);
+        announceToPlayers("§eRadiant orbs begin their deadly dance!");
+    }
+
+    private void updateLightOrbs() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        Iterator<OrbitalLightOrb> orbIterator = lightOrbs.iterator();
+        while (orbIterator.hasNext()) {
+            OrbitalLightOrb orb = orbIterator.next();
+            orb.life++;
+
+            // Update orb angle (orbital motion)
+            orb.angle += ORB_SPEED;
+
+            // Some orbs occasionally descend to attack players
+            if (!orb.isDescending && orb.life > 60 && Math.random() < 0.02) { // 2% chance per tick after 3 seconds
+                orb.isDescending = true;
+            }
+
+            if (orb.isDescending) {
+                orb.height -= 0.3; // Descend speed
+
+                // Check if orb reached ground or hit player
+                Vec3 orbPos = orb.getPosition(this.getX(), this.getY(), this.getZ());
+
+                // Check for player collision
+                for (Player player : this.level().getEntitiesOfClass(Player.class,
+                        new AABB(orbPos.x - 1.5, orbPos.y - 1.5, orbPos.z - 1.5,
+                                orbPos.x + 1.5, orbPos.y + 1.5, orbPos.z + 1.5))) {
+
+                    if (!player.isCreative() && !player.isSpectator()) {
+                        // Deal damage and remove orb
+                        player.hurt(this.damageSources().mobAttack(this), 6.0F);
+                        player.addEffect(new MobEffectInstance(MobEffects.GLOWING, 100, 0));
+
+                        // Create impact effect
+                        serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                                orbPos.x, orbPos.y, orbPos.z, 10, 0.5, 0.5, 0.5, 0.2);
+
+                        player.playSound(SoundEvents.GENERIC_EXPLODE.value(), 1.0F, 1.5F);
+                        orbIterator.remove();
+                        break;
+                    }
+                }
+
+                // Check if reached ground level
+                if (orb.height <= 1.0) {
+                    // Create ground explosion
+                    Vec3 groundPos = orb.getPosition(this.getX(), this.getY() - orb.height + 1.0, this.getZ());
+
+                    serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                            groundPos.x, groundPos.y, groundPos.z, 8, 1.0, 0.2, 1.0, 0.1);
+
+                    // Damage nearby players
+                    for (Player player : this.level().getEntitiesOfClass(Player.class,
+                            new AABB(groundPos.x - 3, groundPos.y - 2, groundPos.z - 3,
+                                    groundPos.x + 3, groundPos.y + 2, groundPos.z + 3))) {
+
+                        if (!player.isCreative() && !player.isSpectator()) {
+                            double distance = player.distanceTo(this);
+
+                            if (distance <= 3.0) {
+                                float damage = (float) (4.0F * (1.0 - distance / 3.0));
+                                player.hurt(this.damageSources().explosion(this, this), damage);
+                            }
+                        }
+                    }
+
+                    orbIterator.remove();
+                }
+            }
+
+            // Show orb visual effects
+            if (orb.life % 2 == 0) { // Every other tick to reduce particle spam
+                Vec3 orbPos = orb.getPosition(this.getX(), this.getY(), this.getZ());
+
+                // Main orb particle
+                serverLevel.sendParticles(ParticleTypes.END_ROD,
+                        orbPos.x, orbPos.y, orbPos.z, 2, 0.1, 0.1, 0.1, 0.05);
+
+                // Trailing effect
+                serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                        orbPos.x, orbPos.y, orbPos.z, 1, 0.2, 0.2, 0.2, 0.02);
+
+                // Special effect for descending orbs
+                if (orb.isDescending) {
+                    serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                            orbPos.x, orbPos.y, orbPos.z, 3, 0.3, 0.3, 0.3, 0.1);
+                }
+            }
+        }
+
+        // Play ambient orb sound
+        if (orbitalAttackTimer % 40 == 0) {
+            this.playSound(SoundEvents.BEACON_AMBIENT, 1.0F, 1.5F);
+        }
+    }
+
+    private void endOrbitalAttack() {
+        isOrbitalAttackActive = false;
+        orbitalAttackTimer = 0;
+        orbitalAttackCooldown = ORBITAL_ATTACK_COOLDOWN;
+
+        // Create final explosion effect for remaining orbs
+        if (this.level() instanceof ServerLevel serverLevel) {
+            for (OrbitalLightOrb orb : lightOrbs) {
+                Vec3 orbPos = orb.getPosition(this.getX(), this.getY(), this.getZ());
+                serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                        orbPos.x, orbPos.y, orbPos.z, 5, 0.5, 0.5, 0.5, 0.2);
+            }
+        }
+
+        lightOrbs.clear();
+        this.playSound(SoundEvents.BEACON_DEACTIVATE, 1.5F, 1.2F);
+    }
+
+    private void performRadiantBurstAttack() {
+        // Handle cooldown
+        if (radiantBurstCooldown > 0) {
+            radiantBurstCooldown--;
+            return;
+        }
+
+        // Find players for targeting
+        List<Player> playersInRange = this.level().getEntitiesOfClass(Player.class,
+                        new AABB(this.getX() - 50, this.getY() - 30, this.getZ() - 50,
+                                this.getX() + 50, this.getY() + 30, this.getZ() + 50))
+                .stream()
+                .filter(player -> !player.isCreative() && !player.isSpectator())
+                .collect(Collectors.toList());
+
+        if (playersInRange.isEmpty()) return;
+
+        // Start attack if not active
+        if (!isRadiantBurstActive) {
+            startRadiantBurstAttack(playersInRange);
+            return;
+        }
+
+        // Handle active attack
+        radiantBurstTimer++;
+
+        if (radiantBurstTimer <= RADIANT_BURST_WARNING) {
+            showRadiantBurstWarning();
+        } else if (radiantBurstTimer <= RADIANT_BURST_WARNING + RADIANT_BURST_DURATION) {
+            executeRadiantBursts();
+        } else {
+            endRadiantBurstAttack();
+        }
+    }
+
+    private void startRadiantBurstAttack(List<Player> players) {
+        isRadiantBurstActive = true;
+        radiantBurstTimer = 0;
+        radiantBurstZones.clear();
+
+        // Create burst zones - some following players, some random
+        for (Player player : players) {
+            // Add zones around each player
+            BlockPos playerPos = player.blockPosition();
+
+            // Multiple bursts per player area
+            for (int i = 0; i < 4; i++) {
+                int offsetX = this.random.nextInt(15) - 7; // -7 to +7
+                int offsetZ = this.random.nextInt(15) - 7;
+                BlockPos burstPos = playerPos.offset(offsetX, 0, offsetZ);
+                radiantBurstZones.add(burstPos);
+            }
+        }
+
+        // Add some random burst zones across the arena
+        BlockPos bossPos = this.blockPosition();
+        for (int i = 0; i < 10; i++) {
+            int offsetX = this.random.nextInt(61) - 30; // -30 to +30
+            int offsetZ = this.random.nextInt(61) - 30;
+            BlockPos randomPos = bossPos.offset(offsetX, 0, offsetZ);
+            radiantBurstZones.add(randomPos);
+        }
+
+        this.playSound(SoundEvents.WITHER_SPAWN, 2.0F, 0.4F);
+        announceToPlayers("§4The very air begins to burn with divine wrath!");
+    }
+
+    private void showRadiantBurstWarning() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        float warningProgress = (float) radiantBurstTimer / RADIANT_BURST_WARNING;
+
+        for (BlockPos burstPos : radiantBurstZones) {
+            // Find ground level for this position
+            BlockPos groundPos = findGroundLevel(burstPos);
+            if (groundPos == null) continue;
+
+            // Warning pillar effect
+            double pillarHeight = 8.0 * warningProgress;
+            for (int i = 0; i < pillarHeight; i++) {
+                double y = groundPos.getY() + i;
+
+                SimpleParticleType particleType = warningProgress > 0.8f ? ParticleTypes.SOUL_FIRE_FLAME :
+                        warningProgress > 0.5f ? ParticleTypes.FLAME : ParticleTypes.SMOKE;
+
+                serverLevel.sendParticles(particleType,
+                        burstPos.getX() + 0.5, y, burstPos.getZ() + 0.5,
+                        1, 0.2, 0.1, 0.2, 0.02);
+            }
+
+            // Ground warning circle
+            if (radiantBurstTimer % 8 == 0) {
+                double radius = 3.0 * warningProgress;
+                int particles = Math.max(8, (int)(radius * 4));
+
+                for (int i = 0; i < particles; i++) {
+                    double angle = (i / (double) particles) * 2 * Math.PI;
+                    double x = burstPos.getX() + 0.5 + Math.cos(angle) * radius;
+                    double z = burstPos.getZ() + 0.5 + Math.sin(angle) * radius;
+
+                    serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
+                            x, groundPos.getY() + 0.1, z, 1, 0, 0, 0, 0);
+                }
+            }
+        }
+
+        // Warning sounds
+        if (radiantBurstTimer % 12 == 0) {
+            float pitch = 0.8f + (warningProgress * 0.6f);
+            this.playSound(SoundEvents.NOTE_BLOCK_PLING.value(), 1.0f + warningProgress, pitch);
+        }
+    }
+
+    private void executeRadiantBursts() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        for (BlockPos burstPos : radiantBurstZones) {
+            BlockPos groundPos = findGroundLevel(burstPos);
+            if (groundPos == null) continue;
+
+            // Create the radiant burst effect
+            createRadiantBurst(serverLevel, groundPos);
+
+            // Damage players in burst area
+            damagePlayersInRadiantBurst(groundPos);
+        }
+
+        // Play burst sound
+        if (radiantBurstTimer % 15 == 0) {
+            this.playSound(SoundEvents.BEACON_POWER_SELECT, 2.0F, 2.0F);
+        }
+    }
+
+    private void createRadiantBurst(ServerLevel serverLevel, BlockPos center) {
+        // Main burst explosion
+        serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                center.getX() + 0.5, center.getY() + 1, center.getZ() + 0.5,
+                20, 1.5, 1.0, 1.5, 0.3);
+
+        // Expanding rings of light
+        for (int ring = 0; ring < 3; ring++) {
+            double radius = 1.0 + (ring * 1.5);
+            int particles = (int)(radius * 8);
+
+            for (int i = 0; i < particles; i++) {
+                double angle = (i / (double) particles) * 2 * Math.PI;
+                double x = center.getX() + 0.5 + Math.cos(angle) * radius;
+                double z = center.getZ() + 0.5 + Math.sin(angle) * radius;
+
+                serverLevel.sendParticles(ParticleTypes.END_ROD,
+                        x, center.getY() + 0.2, z, 2, 0, 0.5, 0, 0.1);
+            }
+        }
+
+        // Upward light pillars
+        for (int i = 0; i < 12; i++) {
+            double height = i * 0.8;
+            serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                    center.getX() + 0.5, center.getY() + height, center.getZ() + 0.5,
+                    3, 0.3, 0.1, 0.3, 0.05);
+        }
+    }
+
+
+    private void damagePlayersInRadiantBurst(BlockPos center) {
+        double burstRadius = 3.5; // Slightly larger than visual effect for better hit detection
+
+        // Create damage area from ground up to account for players at different heights
+        double minY = center.getY();
+        double maxY = center.getY() + 4; // Allow some vertical range
+
+        AABB damageArea = new AABB(
+                center.getX() - burstRadius, minY, center.getZ() - burstRadius,
+                center.getX() + burstRadius, maxY, center.getZ() + burstRadius
+        );
+
+        for (Player player : this.level().getEntitiesOfClass(Player.class, damageArea)) {
+            if (player.isCreative() || player.isSpectator()) continue;
+
+            // Calculate distance from burst center (2D distance for ground-based attack)
+            double distanceFromCenter = Math.sqrt(
+                    Math.pow(player.getX() - (center.getX() + 0.5), 2) +
+                            Math.pow(player.getZ() - (center.getZ() + 0.5), 2)
+            );
+
+            if (distanceFromCenter <= burstRadius) {
+                // Distance-based damage scaling (more damage closer to center)
+                double damageMultiplier = Math.max(0.3, 1.0 - (distanceFromCenter / burstRadius));
+                float damage = (float)(7.0F * damageMultiplier);
+
+                // Apply damage
+                player.hurt(this.damageSources().mobAttack(this), damage);
+
+                // Apply burning effect based on proximity
+                int burnDuration = (int)(60 * damageMultiplier); // 3 seconds max
+                if (burnDuration > 0) {
+                    player.setRemainingFireTicks(burnDuration / 20);
+                }
+
+                // Apply weakness effect
+                player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, 80, 0));
+
+                // Knockback effect - push players away from burst center
+                if (distanceFromCenter > 0.1) { // Avoid division by zero
+                    double knockbackForce = 0.8 * damageMultiplier;
+                    double deltaX = player.getX() - (center.getX() + 0.5);
+                    double deltaZ = player.getZ() - (center.getZ() + 0.5);
+
+                    // Normalize and apply knockback
+                    double distance = Math.sqrt(deltaX * deltaX + deltaZ * deltaZ);
+                    deltaX = (deltaX / distance) * knockbackForce;
+                    deltaZ = (deltaZ / distance) * knockbackForce;
+
+                    player.push(deltaX, 0.3, deltaZ); // Small upward push too
+                }
+
+                // Visual and audio feedback for hit player
+                player.playSound(SoundEvents.BLAZE_HURT, 1.0F, 1.2F);
+
+                // Create impact particles around the player
+                if (this.level() instanceof ServerLevel serverLevel) {
+                    serverLevel.sendParticles(ParticleTypes.CRIT,
+                            player.getX(), player.getY() + 1, player.getZ(),
+                            8, 0.5, 0.5, 0.5, 0.1);
+                }
+            }
+        }
+    }
+
+    private void endRadiantBurstAttack() {
+        isRadiantBurstActive = false;
+        radiantBurstTimer = 0;
+        radiantBurstCooldown = RADIANT_BURST_COOLDOWN;
+
+        // Create final spectacular effect
+        if (this.level() instanceof ServerLevel serverLevel) {
+            // Final explosion at boss position
+            serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                    this.getX(), this.getY() + 2, this.getZ(),
+                    30, 3.0, 2.0, 3.0, 0.5);
+
+            // Create ascending light spirals around remaining burst zones
+            for (BlockPos burstPos : radiantBurstZones) {
+                BlockPos groundPos = findGroundLevel(burstPos);
+                if (groundPos != null) {
+                    // Spiral effect
+                    for (int i = 0; i < 20; i++) {
+                        double angle = (i / 20.0) * 4 * Math.PI; // 2 full rotations
+                        double height = i * 0.5;
+                        double radius = 1.0 + (i * 0.1);
+
+                        double x = groundPos.getX() + 0.5 + Math.cos(angle) * radius;
+                        double z = groundPos.getZ() + 0.5 + Math.sin(angle) * radius;
+                        double y = groundPos.getY() + height;
+
+                        serverLevel.sendParticles(ParticleTypes.END_ROD,
+                                x, y, z, 1, 0, 0, 0, 0.05);
+                    }
+
+                    // Final upward burst from each zone
+                    serverLevel.sendParticles(ParticleTypes.ENCHANTED_HIT,
+                            groundPos.getX() + 0.5, groundPos.getY() + 0.5, groundPos.getZ() + 0.5,
+                            10, 0.8, 3.0, 0.8, 0.3);
+                }
+            }
+        }
+
+        // Clear burst zones
+        radiantBurstZones.clear();
+
+        // Play ending sound
+        this.playSound(SoundEvents.WITHER_DEATH, 1.5F, 1.8F);
+
+        // Optional: Announce attack completion
+        announceToPlayers("§6The divine flames subside... for now.");
     }
 
     @Override
