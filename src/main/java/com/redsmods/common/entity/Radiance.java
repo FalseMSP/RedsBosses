@@ -25,11 +25,14 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.PushReaction;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.*;
@@ -129,9 +132,9 @@ public class Radiance extends Monster {
 
     // Light Beam Attack Fields
     private int lightBeamAttackTimer = 0;
-    private static final int LIGHT_BEAM_WARNING_TIME = 60; // 3 seconds warning
+    private static final int LIGHT_BEAM_WARNING_TIME = 40; // 2 seconds warning
     private static final int LIGHT_BEAM_DURATION = 40; // 2 seconds of beams
-    private static final int LIGHT_BEAM_COOLDOWN = 20 * 18; // 18 second cooldown
+    private static final int LIGHT_BEAM_COOLDOWN = 20 * 10; // 10 second cooldown
     private int lightBeamCooldown = 0;
     private boolean isLightBeamActive = false;
     private final Map<BlockPos, Integer> lightBeamPositions = new HashMap<>();
@@ -139,20 +142,20 @@ public class Radiance extends Monster {
 
     // Orbital Light Orbs Fields
     private int orbitalAttackTimer = 0;
-    private static final int ORBITAL_ATTACK_DURATION = 20 * 12; // 12 seconds of orbital attack
-    private static final int ORBITAL_ATTACK_COOLDOWN = 20 * 22; // 22 second cooldown
+    private static final int ORBITAL_ATTACK_DURATION = 20 * 20; // 20 seconds of orbital attack
+    private static final int ORBITAL_ATTACK_COOLDOWN = 20 * 5; // 7 second cooldown
     private int orbitalAttackCooldown = 0;
     private boolean isOrbitalAttackActive = false;
     private final List<OrbitalLightOrb> lightOrbs = new ArrayList<>();
-    private static final int NUM_LIGHT_ORBS = 8;
-    private static final double ORBITAL_RADIUS = 12.0;
+    private static final int NUM_LIGHT_ORBS = 32;
+    private static final double ORBITAL_RADIUS = 10.0;
     private static final double ORB_SPEED = 0.1; // Radians per tick
 
     // Radiant Burst Fields (area denial)
     private int radiantBurstTimer = 0;
-    private static final int RADIANT_BURST_WARNING = 40; // 2 seconds warning
+    private static final int RADIANT_BURST_WARNING = 20; // 1 second warning
     private static final int RADIANT_BURST_DURATION = 80; // 4 seconds active
-    private static final int RADIANT_BURST_COOLDOWN = 20 * 20; // 20 second cooldown
+    private static final int RADIANT_BURST_COOLDOWN = 20 * 15; // 15 second cooldown
     private int radiantBurstCooldown = 0;
     private boolean isRadiantBurstActive = false;
     private final Set<BlockPos> radiantBurstZones = new HashSet<>();
@@ -360,7 +363,7 @@ public class Radiance extends Monster {
             performSkyTransition();
         } else if (this.state == PHASE.ARENA_BUILDING_2) {
             if (arenaBuilder2 == null)
-                arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4+6,230-50,getBlockZ()+1-3+6),"/arena2.schem",300); // 15 second building
+                arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4+6,230-35,getBlockZ()+1-3+6),"/arena2.schem",600); // 30 second building
             if (arenaBuilder2.tick()) {
                 this.state = PHASE.RADIANCE;
             }
@@ -2694,24 +2697,30 @@ public class Radiance extends Monster {
     }
 
     private static class OrbitalLightOrb {
-        public double angle;
-        public double radius;
+        public double horizontalAngle; // Rotation around Y-axis
+        public double verticalAngle;   // Up/down angle
+        public double radius;          // Distance from boss (now variable)
         public double height;
         public int life;
         public boolean isDescending;
+        public int lastLaserTime;      // Track when last laser was fired
 
-        public OrbitalLightOrb(double angle, double radius, double height) {
-            this.angle = angle;
+        public OrbitalLightOrb(double horizontalAngle, double verticalAngle, double radius, double height) {
+            this.horizontalAngle = horizontalAngle;
+            this.verticalAngle = verticalAngle;
             this.radius = radius;
             this.height = height;
             this.life = 0;
             this.isDescending = false;
+            this.lastLaserTime = 0;
         }
 
-        public Vec3 getPosition(double centerX, double centerY, double centerZ) {
-            double x = centerX + Math.cos(angle) * radius;
-            double z = centerZ + Math.sin(angle) * radius;
-            double y = centerY + height;
+        public Vec3 getPosition(double bossX, double bossY, double bossZ) {
+            // Calculate 3D position using spherical coordinates
+            double x = bossX + radius * Math.cos(verticalAngle) * Math.cos(horizontalAngle);
+            double z = bossZ + radius * Math.cos(verticalAngle) * Math.sin(horizontalAngle);
+            double y = bossY + height + radius * Math.sin(verticalAngle);
+
             return new Vec3(x, y, z);
         }
     }
@@ -2766,7 +2775,7 @@ public class Radiance extends Monster {
             lightBeamPositions.put(playerPos, 0);
 
             // Add some random positions around each player for area coverage
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 7; i++) {
                 int offsetX = this.random.nextInt(21) - 10; // -10 to +10
                 int offsetZ = this.random.nextInt(21) - 10;
                 BlockPos randomPos = playerPos.offset(offsetX, 0, offsetZ);
@@ -2776,7 +2785,7 @@ public class Radiance extends Monster {
 
         // Add some completely random beam positions for chaos
         BlockPos bossPos = this.blockPosition();
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 50; i++) { // 50 beams of light to smash yo ass
             int offsetX = this.random.nextInt(101) - 50; // -50 to +50
             int offsetZ = this.random.nextInt(101) - 50;
             BlockPos randomPos = bossPos.offset(offsetX, 0, offsetZ);
@@ -2973,11 +2982,14 @@ public class Radiance extends Monster {
         orbitalAttackTimer = 0;
         lightOrbs.clear();
 
-        // Create orbital light orbs around the boss
+        // Create orbital light orbs around the boss with varied 3D positions
         for (int i = 0; i < NUM_LIGHT_ORBS; i++) {
-            double angle = (i / (double) NUM_LIGHT_ORBS) * 2 * Math.PI;
+            double horizontalAngle = (i / (double) NUM_LIGHT_ORBS) * 2 * Math.PI;
+            double verticalAngle = (Math.random() - 0.5) * Math.PI * 0.6; // -54° to +54°
+            double radius = ORBITAL_RADIUS * (0.7 + Math.random() * 0.6); // 70% to 130% of base radius
             double height = 8.0 + Math.random() * 4.0; // Vary heights slightly
-            lightOrbs.add(new OrbitalLightOrb(angle, ORBITAL_RADIUS, height));
+
+            lightOrbs.add(new OrbitalLightOrb(horizontalAngle, verticalAngle, radius, height));
         }
 
         this.playSound(SoundEvents.BEACON_POWER_SELECT, 2.0F, 0.8F);
@@ -2992,12 +3004,25 @@ public class Radiance extends Monster {
             OrbitalLightOrb orb = orbIterator.next();
             orb.life++;
 
-            // Update orb angle (orbital motion)
-            orb.angle += ORB_SPEED;
+            // Update orb angles (3D orbital motion)
+            orb.horizontalAngle += ORB_SPEED * (0.8 + Math.sin(orb.life * 0.05) * 0.4); // Variable speed
+            orb.verticalAngle += ORB_SPEED * 0.3 * Math.cos(orb.life * 0.03); // Slower vertical oscillation
+
+            // Gradually change radius for dynamic movement
+            orb.radius += Math.sin(orb.life * 0.02) * 0.05;
+            orb.radius = Math.max(ORBITAL_RADIUS * 0.5, Math.min(orb.radius, ORBITAL_RADIUS * 1.5));
 
             // Some orbs occasionally descend to attack players
             if (!orb.isDescending && orb.life > 60 && Math.random() < 0.02) { // 2% chance per tick after 3 seconds
                 orb.isDescending = true;
+            }
+
+            // Laser attack logic
+            if (!orb.isDescending && orb.life > 40 && orb.life % 60 == 0) { // Every 3 seconds after 2 seconds
+                Player nearestPlayer = findNearestPlayer(orb);
+                if (nearestPlayer != null && hasLineOfSight(orb, nearestPlayer)) {
+                    fireLaser(orb, nearestPlayer, serverLevel);
+                }
             }
 
             if (orb.isDescending) {
@@ -3077,6 +3102,76 @@ public class Radiance extends Monster {
         if (orbitalAttackTimer % 40 == 0) {
             this.playSound(SoundEvents.BEACON_AMBIENT, 1.0F, 1.5F);
         }
+    }
+
+    private Player findNearestPlayer(OrbitalLightOrb orb) {
+        Vec3 orbPos = orb.getPosition(this.getX(), this.getY(), this.getZ());
+        Player nearestPlayer = null;
+        double nearestDistance = Double.MAX_VALUE;
+
+        for (Player player : this.level().getEntitiesOfClass(Player.class,
+                new AABB(orbPos.x - 20, orbPos.y - 20, orbPos.z - 20,
+                        orbPos.x + 20, orbPos.y + 20, orbPos.z + 20))) {
+
+            if (!player.isCreative() && !player.isSpectator()) {
+                double distance = orbPos.distanceTo(player.position());
+                if (distance < nearestDistance && distance <= 15.0) { // 15 block range
+                    nearestDistance = distance;
+                    nearestPlayer = player;
+                }
+            }
+        }
+
+        return nearestPlayer;
+    }
+
+    private boolean hasLineOfSight(OrbitalLightOrb orb, Player player) {
+        Vec3 orbPos = orb.getPosition(this.getX(), this.getY(), this.getZ());
+        Vec3 playerPos = player.getEyePosition();
+
+        // Simple line of sight check using raycast
+        BlockHitResult hitResult = this.level().clip(new ClipContext(
+                orbPos, playerPos,
+                ClipContext.Block.COLLIDER,
+                ClipContext.Fluid.NONE,
+                this));
+
+        return hitResult.getType() == HitResult.Type.MISS ||
+                hitResult.getLocation().distanceTo(playerPos) < 1.0;
+    }
+
+    private void fireLaser(OrbitalLightOrb orb, Player target, ServerLevel serverLevel) {
+        Vec3 orbPos = orb.getPosition(this.getX(), this.getY(), this.getZ());
+        Vec3 targetPos = target.getEyePosition();
+
+        // Create laser beam effect with particles
+        Vec3 direction = targetPos.subtract(orbPos).normalize();
+        double distance = orbPos.distanceTo(targetPos);
+
+        // Create particle trail for laser
+        for (double d = 0; d < distance; d += 0.5) {
+            Vec3 particlePos = orbPos.add(direction.scale(d));
+            serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
+                    particlePos.x, particlePos.y, particlePos.z, 1, 0.05, 0.05, 0.05, 0.01);
+
+            // Add some electric effect
+            if (Math.random() < 0.3) {
+                serverLevel.sendParticles(ParticleTypes.ELECTRIC_SPARK,
+                        particlePos.x, particlePos.y, particlePos.z, 1, 0.1, 0.1, 0.1, 0.02);
+            }
+        }
+
+        // Deal damage to target
+        target.hurt(this.damageSources().mobAttack(this), 4.0F);
+        target.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, 60, 0));
+
+        // Sound and visual effects
+        this.playSound(SoundEvents.GUARDIAN_ATTACK, 1.0F, 1.8F);
+        serverLevel.sendParticles(ParticleTypes.CRIT,
+                targetPos.x, targetPos.y, targetPos.z, 8, 0.5, 0.5, 0.5, 0.2);
+
+        // Mark the orb as having fired recently to prevent spam
+        orb.lastLaserTime = orb.life;
     }
 
     private void endOrbitalAttack() {
