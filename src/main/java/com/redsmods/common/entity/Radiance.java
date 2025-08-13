@@ -20,6 +20,7 @@ import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.monster.Monster;
@@ -361,6 +362,10 @@ public class Radiance extends Monster {
                 performArmorStealAttack();
         } else if (this.state == PHASE.TRANSITION_TO_RADIANCE) {
             performSkyTransition();
+            AttributeInstance scaleAttribute = this.getAttribute(Attributes.SCALE);
+            if (scaleAttribute != null) {
+                scaleAttribute.setBaseValue(5); // changes size to 5x what it was
+            } // why does it call this every tick? idk man
         } else if (this.state == PHASE.ARENA_BUILDING_2) {
             if (arenaBuilder2 == null)
                 arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4-6,230-35,getBlockZ()+1-3-6),"/arena2.schem",600); // 30 second building
@@ -426,9 +431,6 @@ public class Radiance extends Monster {
         // Play dramatic ascension sound
         this.playSound(SoundEvents.BEACON_POWER_SELECT, 3.0F, 0.3F);
         this.playSound(SoundEvents.WITHER_SPAWN, 2.0F, 0.8F);
-
-        // Announce to all players in range
-        announceToPlayers("§6The Radiance begins to ascend to the heavens!");
     }
 
     private void moveBossToSky(float progress) {
@@ -533,9 +535,6 @@ public class Radiance extends Monster {
 
         // Damage and affect players
         affectPlayersInExplosion();
-
-        // Announce the transformation
-        announceToPlayers("§4The heavens themselves tremble before the true power of Radiance!");
 
         // Immediately transition to RADIANCE phase
         this.state = PHASE.ARENA_BUILDING_2;
@@ -2929,8 +2928,8 @@ public class Radiance extends Monster {
             );
 
             if (distanceFromBeam <= beamRadius) {
-                // Deal high damage - this is a powerful attack
-                float damage = 8.0F;
+                // Deal high damage - same as warden melee on hard difficulty (RIP bozo)
+                float damage = 45.0F;
                 player.hurt(this.damageSources().mobAttack(this), damage);
 
                 // Apply radiance effect
@@ -3357,7 +3356,7 @@ public class Radiance extends Monster {
 
 
     private void damagePlayersInRadiantBurst(BlockPos center) {
-        double burstRadius = 3.5; // Slightly larger than visual effect for better hit detection
+        double burstRadius = 5; // Slightly larger than visual effect for better hit detection
 
         // Create damage area from ground up to account for players at different heights
         double minY = center.getY();
@@ -3380,7 +3379,7 @@ public class Radiance extends Monster {
             if (distanceFromCenter <= burstRadius) {
                 // Distance-based damage scaling (more damage closer to center)
                 double damageMultiplier = Math.max(0.3, 1.0 - (distanceFromCenter / burstRadius));
-                float damage = (float)(7.0F * damageMultiplier);
+                float damage = (float)(70.0F * damageMultiplier); // this one hits like a TRUCK, pretty dodgeable though.
 
                 // Apply damage
                 player.hurt(this.damageSources().mobAttack(this), damage);
@@ -3464,9 +3463,6 @@ public class Radiance extends Monster {
 
         // Play ending sound
         this.playSound(SoundEvents.WITHER_DEATH, 1.5F, 1.8F);
-
-        // Optional: Announce attack completion
-        announceToPlayers("§6The divine flames subside... for now.");
     }
 
     @Override
