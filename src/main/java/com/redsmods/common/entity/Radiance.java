@@ -11,6 +11,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.BossEvent;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -25,6 +26,7 @@ import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.Arrow;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
@@ -161,6 +163,15 @@ public class Radiance extends Monster {
     private boolean isRadiantBurstActive = false;
     private final Set<BlockPos> radiantBurstZones = new HashSet<>();
 
+    // spiral arrow attack fields
+    private boolean isSpiralArrowActive = false;
+    private int spiralArrowTimer = 0;
+    private int spiralArrowCooldownTimer = 0;
+    private double spiralArrowStartAngle = 0;
+    private static final int SPIRAL_ARROW_COOLDOWN = 200; // 10 seconds
+
+    private final Map<UUID, Integer> proximityTrackingMap = new HashMap<>();
+    private static final int PROXIMITY_SLAM_THRESHOLD = 200; // 10 seconds (20 ticks per second)
 
     public Radiance(EntityType<? extends Monster> entityType, Level level) {
         super(entityType, level);
@@ -379,6 +390,10 @@ public class Radiance extends Monster {
             performOrbitalLightAttack();
 
             performRadiantBurstAttack();
+
+            performSpiralArrowAttack();
+
+            performProximitySlamAttack();
         }
 
         // Break blocks within hitbox
@@ -386,6 +401,232 @@ public class Radiance extends Monster {
 
         // Update boss bar
         updateBossBar();
+    }
+
+    private void performProximitySlamAttack() {
+        // Get all players within 5 blocks
+        List<Player> nearbyPlayers = this.level().getEntitiesOfClass(Player.class,
+                this.getBoundingBox().inflate(7.0),
+                player -> player.isAlive() && !player.isCreative() && !player.isSpectator());
+
+        // Update tracking for each nearby player
+        for (Player player : nearbyPlayers) {
+            UUID playerId = player.getUUID();
+
+            if (proximityTrackingMap.containsKey(playerId)) {
+                // Player was already nearby, increment timer
+                int currentTime = proximityTrackingMap.get(playerId);
+                proximityTrackingMap.put(playerId, currentTime + 1);
+
+                // Show warning effects as they get close to slam time
+                int timeLeft = PROXIMITY_SLAM_THRESHOLD - currentTime;
+                if (timeLeft <= 100 && timeLeft > 0) { // Last 5 seconds
+                    showProximityWarning(player, timeLeft);
+                }
+
+                // Slam them if they've been too close for too long
+                if (currentTime >= PROXIMITY_SLAM_THRESHOLD) {
+                    slamPlayer(player);
+                    proximityTrackingMap.remove(playerId); // Reset after slam
+
+                    // Play slam sound and effects
+                    this.playSound(SoundEvents.ANVIL_LAND, 3.0F, 0.5F);
+                    this.playSound(SoundEvents.GENERIC_EXPLODE.value(), 2.0F, 0.8F);
+
+                    // Particle explosion at player location
+                    if (this.level() instanceof ServerLevel serverLevel) {
+                        serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                                player.getX(), player.getY(), player.getZ(), 5, 1, 1, 1, 0.1);
+                        serverLevel.sendParticles(ParticleTypes.LARGE_SMOKE,
+                                player.getX(), player.getY(), player.getZ(), 20, 2, 1, 2, 0.1);
+                    }
+                }
+            } else {
+                // New player entered range
+                proximityTrackingMap.put(playerId, 1);
+
+                // Play warning sound when they first get too close
+                player.playNotifySound(SoundEvents.NOTE_BLOCK_BASS.value(), SoundSource.HOSTILE, 1.0F, 0.5F);
+            }
+        }
+
+        // Remove players who are no longer nearby from tracking
+        proximityTrackingMap.entrySet().removeIf(entry -> {
+            UUID playerId = entry.getKey();
+            Player player = this.level().getPlayerByUUID(playerId);
+
+            if (player == null || !player.isAlive()) return true;
+
+            double distance = this.distanceTo(player);
+            if (distance > 5.0) {
+                // Player moved away, play relief sound
+                if (entry.getValue() > 20) { // Only if they were close for at least 1 second
+                    player.playNotifySound(SoundEvents.NOTE_BLOCK_CHIME.value(), SoundSource.NEUTRAL, 1.0F, 1.5F);
+                }
+                return true; // Remove from map
+            }
+
+            return false; // Keep in map
+        });
+    }
+
+    private void showProximityWarning(Player player, int ticksLeft) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Calculate warning intensity (0.0 to 1.0, higher as time runs out)
+        float intensity = 1.0f - (ticksLeft / 100.0f);
+
+        // Red particles around the player getting more intense
+        int particleCount = (int)(10 * intensity) + 2;
+        for (int i = 0; i < particleCount; i++) {
+            double angle = Math.random() * 2 * Math.PI;
+            double radius = 1.5 + Math.random() * 1.0;
+            double x = player.getX() + Math.cos(angle) * radius;
+            double z = player.getZ() + Math.sin(angle) * radius;
+            double y = player.getY() + Math.random() * 2.0;
+
+            serverLevel.sendParticles(ParticleTypes.ANGRY_VILLAGER,
+                    x, y, z, 1, 0, 0.2, 0, 0.05);
+
+            // Add flame particles for extra intensity
+            if (intensity > 0.5f) {
+                serverLevel.sendParticles(ParticleTypes.FLAME,
+                        x, y, z, 1, 0.1, 0.1, 0.1, 0.02);
+            }
+        }
+
+        // Warning sounds getting faster
+        if (ticksLeft % (20 - (int)(15 * intensity)) == 0) {
+            float pitch = 1.0f + intensity;
+            player.playNotifySound(SoundEvents.NOTE_BLOCK_PLING.value(), SoundSource.HOSTILE,
+                    0.5f + intensity, pitch);
+        }
+
+        // Screen shake effect by sending explosion particles near player
+        if (intensity > 0.7f && ticksLeft % 5 == 0) {
+            serverLevel.sendParticles(ParticleTypes.EXPLOSION,
+                    player.getX(), player.getY() + 1, player.getZ(), 1, 0.5, 0.5, 0.5, 0);
+        }
+    }
+
+    private void performSpiralArrowAttack() {
+        if (!isSpiralArrowActive) {
+            // Check cooldown
+            if (spiralArrowCooldownTimer > 0) {
+                spiralArrowCooldownTimer--;
+                return;
+            }
+
+            startSpiralArrowAttack();
+            return;
+        }
+
+        spiralArrowTimer++;
+
+        // Fire arrows over 5 seconds (100 ticks), 1 arrow per tick
+        if (spiralArrowTimer <= 100) {
+            fireSpiralArrow(spiralArrowTimer - 1); // 0-99 for array indexing
+        }
+
+        // End attack after all arrows fired
+        if (spiralArrowTimer >= 120) { // Small delay after last arrow
+            endSpiralArrowAttack();
+        }
+    }
+
+    private void startSpiralArrowAttack() {
+        isSpiralArrowActive = true;
+        spiralArrowTimer = 0;
+        spiralArrowStartAngle = Math.random() * 2 * Math.PI; // Random starting angle
+
+        // Play warning sound
+//        this.playSound(SoundEvents.CROSSBOW_LOADING_END, 3.0F, 0.5F);
+//        this.playSound(SoundEvents.BEACON_POWER_SELECT, 2.0F, 1.5F);
+
+        // Particle warning effect
+        if (this.level() instanceof ServerLevel serverLevel) {
+            // Create warning circle
+            for (int i = 0; i < 36; i++) {
+                double angle = (i / 36.0) * 2 * Math.PI;
+                double x = this.getX() + Math.cos(angle) * 15.0;
+                double z = this.getZ() + Math.sin(angle) * 15.0;
+                serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                        x, this.getY(), z, 1, 0, 2, 0, 0.1);
+            }
+        }
+    }
+
+    private void fireSpiralArrow(int arrowIndex) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        // Calculate spiral parameters
+        float progress = arrowIndex / 99.0f; // 0.0 to 1.0
+        double spiralRevolutions = 3.0; // 3 full rotations over the attack
+        double spiralAngle = spiralArrowStartAngle + (spiralRevolutions * 2 * Math.PI * progress);
+
+        // Expand outward as we go - start further out to avoid spawning inside boss
+        double spiralRadius = 15.0 + (progress * 15.0); // Start at 15 blocks, end at 30 blocks
+
+        // Calculate firing position around the boss
+        double fireX = this.getX() + Math.cos(spiralAngle) * spiralRadius;
+        double fireY = this.getY() + 8.0; // Fire from well above boss
+        double fireZ = this.getZ() + Math.sin(spiralAngle) * spiralRadius;
+
+        // Find nearest player as target
+        Player nearestPlayer = this.level().getNearestPlayer(this.getX(), this.getY(), this.getZ(), 50.0, false);
+        if (nearestPlayer == null) return;
+
+        // Create arrow entity
+        Arrow arrow = new Arrow(EntityType.ARROW, this.level());
+        arrow.setOwner(this);
+        arrow.setPos(fireX, fireY, fireZ);
+
+        // Calculate direction to player with some leading
+        Vec3 playerPos = nearestPlayer.position().add(nearestPlayer.getDeltaMovement().scale(10)); // Lead target
+        Vec3 direction = playerPos.subtract(new Vec3(fireX, fireY, fireZ)).normalize();
+
+        // Set arrow velocity and properties
+        double arrowSpeed = 2.0 + (progress * 1.0); // Faster arrows as attack progresses
+        Vec3 velocity = direction.scale(arrowSpeed);
+        arrow.setDeltaMovement(velocity);
+        arrow.setBaseDamage(8.0 + (progress * 4.0)); // 8-12 damage, stronger as attack progresses
+        arrow.setCritArrow(true);
+        arrow.setRemainingFireTicks(100); // Flaming arrows
+
+        // Add the arrow to the world
+        this.level().addFreshEntity(arrow);
+
+        // Particle effects at firing position
+        serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                fireX, fireY, fireZ, 3, 0.2, 0.2, 0.2, 0.1);
+        serverLevel.sendParticles(ParticleTypes.END_ROD,
+                fireX, fireY, fireZ, 2, 0.1, 0.1, 0.1, 0.05);
+
+        // Sound effect every few arrows to avoid spam
+        if (arrowIndex % 10 == 0) {
+            this.playSound(SoundEvents.CROSSBOW_SHOOT, 1.0F, 1.2F + (progress * 0.8F));
+        }
+    }
+
+    private void endSpiralArrowAttack() {
+        isSpiralArrowActive = false;
+        spiralArrowTimer = 0;
+        spiralArrowCooldownTimer = SPIRAL_ARROW_COOLDOWN; // Set cooldown
+
+        // Final dramatic sound
+//        this.playSound(SoundEvents.CROSSBOW_LOADING_END.value(), 3.0F, 2.0F);
+
+        // Final particle burst
+        if (this.level() instanceof ServerLevel serverLevel) {
+            for (int i = 0; i < 50; i++) {
+                double angle = Math.random() * 2 * Math.PI;
+                double radius = Math.random() * 8.0;
+                double x = this.getX() + Math.cos(angle) * radius;
+                double z = this.getZ() + Math.sin(angle) * radius;
+                serverLevel.sendParticles(ParticleTypes.SOUL_FIRE_FLAME,
+                        x, this.getY() + 1, z, 1, 0, 1, 0, 0.2);
+            }
+        }
     }
 
     private void performSkyTransition() {
