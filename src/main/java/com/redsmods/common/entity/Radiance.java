@@ -6,6 +6,9 @@ import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.particles.SimpleParticleType;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.syncher.EntityDataAccessor;
+import net.minecraft.network.syncher.EntityDataSerializers;
+import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerBossEvent;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -41,24 +44,15 @@ import net.minecraft.world.phys.Vec3;
 import java.util.*;
 import java.util.stream.Collectors;
 
-enum PHASE {
-    DEACTIVATED_IDOL,
-    ARENA_BUILDING,
-    ACTIVATED_IDOL,
-    TRANSITION_TO_RADIANCE,
-    ARENA_BUILDING_2,
-    RADIANCE,
-    TRANSITION_TO_TRUE,
-    TRUE_RADIANCE
-}
-
 public class Radiance extends Monster {
     private SpiralStructureBuilder arenaBuilder;
     private SpiralStructureBuilder arenaBuilder2;
     private float floatTimer = 0.0F;
     private double groundY = -1; // Store the ground level
-    private PHASE state = PHASE.DEACTIVATED_IDOL;
-    private final PHASE[] invulnerablePhases = {PHASE.DEACTIVATED_IDOL,PHASE.ARENA_BUILDING,PHASE.TRANSITION_TO_RADIANCE,PHASE.TRANSITION_TO_TRUE};
+    public RADIANCE_PHASE state = RADIANCE_PHASE.DEACTIVATED_IDOL;
+    private static final EntityDataAccessor<Integer> PHASE_DATA =
+            SynchedEntityData.defineId(Radiance.class, EntityDataSerializers.INT);
+    private final RADIANCE_PHASE[] invulnerableRADIANCEPhases = {RADIANCE_PHASE.DEACTIVATED_IDOL, RADIANCE_PHASE.ARENA_BUILDING, RADIANCE_PHASE.TRANSITION_TO_RADIANCE, RADIANCE_PHASE.TRANSITION_TO_TRUE, RADIANCE_PHASE.ARENA_BUILDING_2};
 
     // Boss bar
     private final ServerBossEvent bossEvent = new ServerBossEvent(
@@ -183,6 +177,12 @@ public class Radiance extends Monster {
     }
 
     @Override
+    protected void defineSynchedData(SynchedEntityData.Builder builder) {
+        super.defineSynchedData(builder);
+        builder.define(PHASE_DATA, RADIANCE_PHASE.DEACTIVATED_IDOL.ordinal());
+    }
+
+    @Override
     public boolean canReplaceCurrentItem(net.minecraft.world.item.ItemStack candidate, net.minecraft.world.item.ItemStack existing) {
         if (candidate.isEmpty()) return false;
 
@@ -205,11 +205,11 @@ public class Radiance extends Monster {
     // Make the mob completely invulnerable to all damage
     @Override
     public boolean hurt(DamageSource damageSource, float amount) {
-        if (damageSource.is(DamageTypes.GENERIC_KILL) || !Arrays.asList(invulnerablePhases).contains(this.state)) {
+        if (damageSource.is(DamageTypes.GENERIC_KILL) || !Arrays.asList(invulnerableRADIANCEPhases).contains(this.state)) {
             boolean result = super.hurt(damageSource, amount);
 
             // Check if health reached 0 and transition to next phase
-            if (this.getHealth() <= 0 && !damageSource.is(DamageTypes.GENERIC_KILL)) {
+            if (this.getHealth() <= 0 && !damageSource.is(DamageTypes.GENERIC_KILL) && !state.equals(RADIANCE_PHASE.RADIANCE)) {
                 transitionToNextPhase();
                 return false; // Prevent actual death
             }
@@ -218,15 +218,15 @@ public class Radiance extends Monster {
             updateBossBar();
             return result;
         }
-        return false; // Always return false to prevent any damage
+        return false;
     }
 
     private void transitionToNextPhase() {
-        PHASE nextPhase = getNextPhase();
+        RADIANCE_PHASE nextRADIANCEPhase = getNextPhase();
 
-        if (nextPhase != null) {
+        if (nextRADIANCEPhase != null) {
             // Set to transition phase first if applicable
-            this.state = nextPhase;
+            this.state = nextRADIANCEPhase;
 
             // Restore full health
             this.setHealth(this.getMaxHealth());
@@ -235,7 +235,7 @@ public class Radiance extends Monster {
             this.playSound(SoundEvents.BEACON_POWER_SELECT, 2.0F, 0.5F);
 
             // Make invulnerable during transition phases
-            if (Arrays.asList(invulnerablePhases).contains(nextPhase)) {
+            if (Arrays.asList(invulnerableRADIANCEPhases).contains(nextRADIANCEPhase)) {
 
             }
 
@@ -244,10 +244,10 @@ public class Radiance extends Monster {
         }
     }
 
-    private PHASE getNextPhase() {
+    private RADIANCE_PHASE getNextPhase() {
         return switch (this.state) {
-            case ACTIVATED_IDOL -> PHASE.TRANSITION_TO_RADIANCE;
-            case RADIANCE -> PHASE.TRANSITION_TO_TRUE;
+            case ACTIVATED_IDOL -> RADIANCE_PHASE.TRANSITION_TO_RADIANCE;
+            case RADIANCE -> RADIANCE_PHASE.TRANSITION_TO_TRUE;
             case TRUE_RADIANCE -> null; // Final phase, boss actually dies
             default -> null;
         };
@@ -306,8 +306,8 @@ public class Radiance extends Monster {
     @Override
     public InteractionResult mobInteract(Player player, InteractionHand hand) {
         if (!this.level().isClientSide) {
-            if (player.getItemInHand(hand).is(Items.STRUCTURE_VOID) && this.state == PHASE.DEACTIVATED_IDOL) {
-                this.state = PHASE.ARENA_BUILDING;
+            if (player.getItemInHand(hand).is(Items.STRUCTURE_VOID) && this.state == RADIANCE_PHASE.DEACTIVATED_IDOL) {
+                this.state = RADIANCE_PHASE.ARENA_BUILDING;
 
                 // Play a sound to indicate the change
                 this.playSound(SoundEvents.BEACON_POWER_SELECT, 1.0F, 1.0F);
@@ -322,9 +322,14 @@ public class Radiance extends Monster {
     @Override
     public void tick() {
         super.tick();
-        if (this.level().isClientSide) return; // only update these things on the serverside
+        if (this.level().isClientSide) {
+            // Client-side: update local state from synced data
+            state = RADIANCE_PHASE.values()[this.entityData.get(PHASE_DATA)];
+            return;
+        }; // only update these things on the serverside
 
-        if (this.state == PHASE.DEACTIVATED_IDOL) {
+        this.entityData.set(PHASE_DATA, this.state.ordinal());
+        if (this.state == RADIANCE_PHASE.DEACTIVATED_IDOL) {
             // Set ground level on first tick or if not set
             if (groundY == -1) {
                 groundY = this.getY();
@@ -342,15 +347,15 @@ public class Radiance extends Monster {
 
             // Prevent gravity
             this.setNoGravity(true);
-        } else if (this.state == PHASE.ARENA_BUILDING) {
+        } else if (this.state == RADIANCE_PHASE.ARENA_BUILDING) {
             if (arenaBuilder == null)
                 arenaBuilder = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4,(int) groundY-9,getBlockZ()+1-3),"/boss_arena.schem",200);
             if (arenaBuilder.tick()) {
-                this.state = PHASE.ACTIVATED_IDOL;
+                this.state = RADIANCE_PHASE.ACTIVATED_IDOL;
                 showBossBar();
             }
             this.moveTo(this.getX(), groundY, this.getZ());
-        } else if (this.state == PHASE.ACTIVATED_IDOL) {
+        } else if (this.state == RADIANCE_PHASE.ACTIVATED_IDOL) {
             // if they are in the air, slam them onto the ground
             performAirSlamAttack();
 
@@ -371,20 +376,21 @@ public class Radiance extends Monster {
             // armor steal attack IF KNOCKBACK IS ON COOLDOWN
             if (knockbackCooldownTimer > 1 && knockbackCooldownTimer < KNOCKBACK_COOLDOWN - 20*4 && !this.hasEffect(MobEffects.WEAKNESS)) // only attack if knockback is on cooldown AFTER 4 seconds AND does not have weakness.
                 performArmorStealAttack();
-        } else if (this.state == PHASE.TRANSITION_TO_RADIANCE) {
+        } else if (this.state == RADIANCE_PHASE.TRANSITION_TO_RADIANCE) {
             performSkyTransition();
             AttributeInstance scaleAttribute = this.getAttribute(Attributes.SCALE);
             if (scaleAttribute != null) {
                 scaleAttribute.setBaseValue(5); // changes size to 5x what it was
             } // why does it call this every tick? idk man
-        } else if (this.state == PHASE.ARENA_BUILDING_2) {
+        } else if (this.state == RADIANCE_PHASE.ARENA_BUILDING_2) {
             if (arenaBuilder2 == null)
                 arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4-6,230-35,getBlockZ()+1-3-6),"/arena2.schem",600); // 30 second building
             if (arenaBuilder2.tick()) {
-                this.state = PHASE.RADIANCE;
+                this.state = RADIANCE_PHASE.RADIANCE;
             }
+
             this.moveTo(this.getX(), 230-9, this.getZ());
-        } else if (this.state == PHASE.RADIANCE) {
+        } else if (this.state == RADIANCE_PHASE.RADIANCE) {
             performLightBeamAttack();
 
             performOrbitalLightAttack();
@@ -778,7 +784,7 @@ public class Radiance extends Monster {
         affectPlayersInExplosion();
 
         // Immediately transition to RADIANCE phase
-        this.state = PHASE.ARENA_BUILDING_2;
+        this.state = RADIANCE_PHASE.ARENA_BUILDING_2;
     }
 
     private void createSkyHole(ServerLevel serverLevel) {
@@ -1433,7 +1439,7 @@ public class Radiance extends Monster {
 
     private void performArrowReflection() {
         // Only reflect arrows when not in deactivated or building phases
-        if (this.state == PHASE.DEACTIVATED_IDOL || this.state == PHASE.ARENA_BUILDING) {
+        if (this.state == RADIANCE_PHASE.DEACTIVATED_IDOL || this.state == RADIANCE_PHASE.ARENA_BUILDING) {
             return;
         }
 
@@ -2141,7 +2147,7 @@ public class Radiance extends Monster {
     }
 
     private void updateBossBar() {
-        if (this.state != PHASE.DEACTIVATED_IDOL && this.state != PHASE.ARENA_BUILDING) {
+        if (this.state != RADIANCE_PHASE.DEACTIVATED_IDOL && this.state != RADIANCE_PHASE.ARENA_BUILDING) {
             // Update health percentage
             float healthPercentage = this.getHealth() / this.getMaxHealth();
             this.bossEvent.setProgress(healthPercentage);
@@ -2243,7 +2249,7 @@ public class Radiance extends Monster {
         }
         if (tag.contains("Phase")) {
             int stateInt = tag.getInt("Phase");
-            this.state = PHASE.values()[stateInt];
+            this.state = RADIANCE_PHASE.values()[stateInt];
         }
 
         // Load AOE knockback state
@@ -2620,7 +2626,7 @@ public class Radiance extends Monster {
     public void onBlockPlaced(BlockPos pos) {
         // Check if block is within range of boss
         double distance = Math.sqrt(pos.distSqr(this.blockPosition()));
-        if (distance <= BLOCK_DETECTION_RANGE && state != PHASE.DEACTIVATED_IDOL) {
+        if (distance <= BLOCK_DETECTION_RANGE && state != RADIANCE_PHASE.DEACTIVATED_IDOL) {
             recentBlockPlacements.put(pos, this.level().getGameTime());
 
             // Play warning sound immediately

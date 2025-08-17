@@ -1,0 +1,12 @@
+package com.redsmods.common.entity;
+
+public enum RADIANCE_PHASE {
+    DEACTIVATED_IDOL,
+    ARENA_BUILDING,
+    ACTIVATED_IDOL,
+    TRANSITION_TO_RADIANCE,
+    ARENA_BUILDING_2,
+    RADIANCE,
+    TRANSITION_TO_TRUE,
+    TRUE_RADIANCE
+}
