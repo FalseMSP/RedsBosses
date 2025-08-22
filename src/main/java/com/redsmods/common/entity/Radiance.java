@@ -1,6 +1,8 @@
 package com.redsmods.common.entity;
 
 import com.redsmods.common.SpiralStructureBuilder;
+import net.minecraft.commands.CommandSource;
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.particles.ParticleTypes;
@@ -190,6 +192,8 @@ public class Radiance extends Monster {
 
     @Override
     public Vec3 getPassengerAttachmentPoint(Entity passenger, EntityDimensions dimensions, float scaleFactor) {
+        if (currentModelData == 1)
+            return new Vec3(0.0D, 3.0D, 0.0D);
         return new Vec3(0.0D, 0.0D, 0.0D);
     }
 
@@ -222,6 +226,11 @@ public class Radiance extends Monster {
     // Make the mob completely invulnerable to all damage
     @Override
     public boolean hurt(DamageSource damageSource, float amount) {
+
+        if (damageSource.getDirectEntity() instanceof Arrow arrow && arrow.getOwner() == this) {
+            return false;
+        }
+
         if (damageSource.is(DamageTypes.GENERIC_KILL) || !Arrays.asList(invulnerableRADIANCEPhases).contains(this.state)) {
             boolean result = super.hurt(damageSource, amount);
 
@@ -423,7 +432,7 @@ public class Radiance extends Monster {
             updateItemDisplayModel(2);
 
             if (arenaBuilder2 == null)
-                arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4-6,230-35,getBlockZ()+1-3-6),"/arena2.schem",600); // 30 second building
+                arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4-6,230-35,getBlockZ()+1-3-6),"/arena2.schem",200); // 10 second building
             if (arenaBuilder2.tick()) {
                 this.state = RADIANCE_PHASE.RADIANCE;
             }
@@ -507,68 +516,81 @@ public class Radiance extends Monster {
     private void spawnItemDisplay() {
         if (this.level().isClientSide || itemDisplayEntity != null) return;
 
-        // Create the item display entity
-        itemDisplayEntity = new Display.ItemDisplay(EntityType.ITEM_DISPLAY, this.level());
+        ServerLevel serverLevel = (ServerLevel) this.level();
 
-        // Set initial position (same as boss)
-        itemDisplayEntity.setPos(this.getX(), this.getY(), this.getZ());
+        // Build the summon command with glowing enabled
+        String summonCommand = String.format(
+                "summon minecraft:item_display %f %f %f {item:{id:\"minecraft:potion\",count:1,components:{\"minecraft:custom_model_data\":1,\"minecraft:potion_contents\":{custom_color:16711680}}},transformation:{scale:[2.0f,2.0f,2.0f]},brightness:{block:15,sky:0}}",
+                this.getX(), this.getY(), this.getZ()
+        );
 
-        // Configure item display properties
-        itemDisplayEntity.setNoGravity(true);
+        // Execute the summon command
+        serverLevel.getServer().getCommands().performPrefixedCommand(
+                new CommandSourceStack(
+                        CommandSource.NULL,
+                        this.position(),
+                        this.getRotationVector(),
+                        serverLevel,
+                        4, // Permission level
+                        "system",
+                        Component.literal("system"),
+                        serverLevel.getServer(),
+                        null
+                ),
+                summonCommand
+        );
 
-        // Set the item via NBT data (equivalent to the /data modify command)
-        CompoundTag itemNBT = new CompoundTag();
-        itemNBT.putString("id", "minecraft:potion");
-        itemNBT.putInt("count", 1);
+        // Find the closest ItemDisplay entity near the boss and save it
+        List<Display.ItemDisplay> nearbyDisplays = serverLevel.getEntitiesOfClass(
+                Display.ItemDisplay.class,
+                this.getBoundingBox().inflate(1.0) // Search radius = 1 block
+        );
 
-        // Add components
-        CompoundTag components = new CompoundTag();
-        components.putInt("minecraft:custom_model_data", currentModelData);
+        if (!nearbyDisplays.isEmpty()) {
+            itemDisplayEntity = nearbyDisplays.stream()
+                    .min(Comparator.comparingDouble(e -> e.distanceToSqr(this)))
+                    .orElse(null);
+        }
 
-        CompoundTag potionContents = new CompoundTag();
-        potionContents.putInt("custom_color", 16711680); // Red color
-        components.put("minecraft:potion_contents", potionContents);
-
-        itemNBT.put("components", components);
-
-        // Set the item data directly in the entity's NBT
-        CompoundTag entityData = new CompoundTag();
-        entityData.put("item", itemNBT);
-        itemDisplayEntity.load(entityData);
-
-        // Add as passenger
         itemDisplayEntity.startRiding(this);
-
-        // Spawn in world
-        this.level().addFreshEntity(itemDisplayEntity);
     }
+
+
+
 
     // Update method for item display
     private void updateItemDisplayModel(int newModelData) {
+        // No entity to update OR no change needed
         if (itemDisplayEntity == null || currentModelData == newModelData) return;
 
         currentModelData = newModelData;
 
-        // Create updated item NBT
-        CompoundTag itemNBT = new CompoundTag();
-        itemNBT.putString("id", "minecraft:potion");
-        itemNBT.putInt("count", 1);
+        ServerLevel serverLevel = (ServerLevel) this.level();
 
-        // Add components with new model data
-        CompoundTag components = new CompoundTag();
-        components.putInt("minecraft:custom_model_data", newModelData);
+        // Build the command to update the custom model data
+        String command = String.format(
+                "data modify entity %s item.components.\"minecraft:custom_model_data\" set value %d",
+                itemDisplayEntity.getStringUUID(), // Use UUID to target the entity precisely
+                newModelData
+        );
 
-        CompoundTag potionContents = new CompoundTag();
-        potionContents.putInt("custom_color", 16711680); // Red color
-        components.put("minecraft:potion_contents", potionContents);
-
-        itemNBT.put("components", components);
-
-        // Update the entity's item data
-        CompoundTag entityData = itemDisplayEntity.saveWithoutId(new CompoundTag());
-        entityData.put("item", itemNBT);
-        itemDisplayEntity.load(entityData);
+        // Execute the data modify command
+        serverLevel.getServer().getCommands().performPrefixedCommand(
+                new CommandSourceStack(
+                        CommandSource.NULL,
+                        itemDisplayEntity.position(),
+                        itemDisplayEntity.getRotationVector(),
+                        serverLevel,
+                        4, // Permission level (OP)
+                        "system",
+                        Component.literal("system"),
+                        serverLevel.getServer(),
+                        null
+                ),
+                command
+        );
     }
+
 
     private void performProximitySlamAttack() {
         // Get all players within 5 blocks
@@ -753,7 +775,7 @@ public class Radiance extends Monster {
         Vec3 direction = playerPos.subtract(new Vec3(fireX, fireY, fireZ)).normalize();
 
         // Set arrow velocity and properties
-        double arrowSpeed = 2.0 + (progress * 1.0); // Faster arrows as attack progresses
+        double arrowSpeed = 2.0 + (progress * 3.0); // Faster arrows as attack progresses
         Vec3 velocity = direction.scale(arrowSpeed);
         arrow.setDeltaMovement(velocity);
         arrow.setBaseDamage(8.0 + (progress * 4.0)); // 8-12 damage, stronger as attack progresses
