@@ -2,6 +2,7 @@ package com.redsmods.common.entity;
 
 import com.redsmods.common.SpiralStructureBuilder;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.particles.SimpleParticleType;
 import net.minecraft.nbt.CompoundTag;
@@ -22,15 +23,19 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.*;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.Arrow;
+import net.minecraft.world.item.ItemDisplayContext;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.alchemy.PotionContents;
+import net.minecraft.world.item.component.CustomModelData;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
@@ -45,6 +50,13 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 public class Radiance extends Monster {
+
+    // display
+    private ArmorStand armorStandEntity;
+    private int currentModelData = 1;
+
+    private Display.ItemDisplay itemDisplayEntity;
+
     private SpiralStructureBuilder arenaBuilder;
     private SpiralStructureBuilder arenaBuilder2;
     private float floatTimer = 0.0F;
@@ -177,6 +189,11 @@ public class Radiance extends Monster {
     }
 
     @Override
+    public Vec3 getPassengerAttachmentPoint(Entity passenger, EntityDimensions dimensions, float scaleFactor) {
+        return new Vec3(0.0D, 0.0D, 0.0D);
+    }
+
+    @Override
     protected void defineSynchedData(SynchedEntityData.Builder builder) {
         super.defineSynchedData(builder);
         builder.define(PHASE_DATA, RADIANCE_PHASE.DEACTIVATED_IDOL.ordinal());
@@ -213,7 +230,9 @@ public class Radiance extends Monster {
                 transitionToNextPhase();
                 return false; // Prevent actual death
             }
-
+            if (this.getHealth() <= 0 && state.equals(RADIANCE_PHASE.RADIANCE))
+//                armorStandEntity.kill();
+                itemDisplayEntity.kill();
             // Update boss bar health
             updateBossBar();
             return result;
@@ -328,8 +347,19 @@ public class Radiance extends Monster {
             return;
         }; // only update these things on the serverside
 
+        // Spawn armor stand on first server tick if not spawned
+//        if (armorStandEntity == null) {
+//            spawnArmorStand();
+//        }
+        if(itemDisplayEntity == null) {
+            spawnItemDisplay();
+        }
+
         this.entityData.set(PHASE_DATA, this.state.ordinal());
+
         if (this.state == RADIANCE_PHASE.DEACTIVATED_IDOL) {
+//            updateArmorStandModel(1);
+            updateItemDisplayModel(1);
             // Set ground level on first tick or if not set
             if (groundY == -1) {
                 groundY = this.getY();
@@ -348,6 +378,8 @@ public class Radiance extends Monster {
             // Prevent gravity
             this.setNoGravity(true);
         } else if (this.state == RADIANCE_PHASE.ARENA_BUILDING) {
+//            updateArmorStandModel(1);
+            updateItemDisplayModel(1);
             if (arenaBuilder == null)
                 arenaBuilder = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4,(int) groundY-9,getBlockZ()+1-3),"/boss_arena.schem",200);
             if (arenaBuilder.tick()) {
@@ -356,6 +388,8 @@ public class Radiance extends Monster {
             }
             this.moveTo(this.getX(), groundY, this.getZ());
         } else if (this.state == RADIANCE_PHASE.ACTIVATED_IDOL) {
+//            updateArmorStandModel(1);
+            updateItemDisplayModel(1);
             // if they are in the air, slam them onto the ground
             performAirSlamAttack();
 
@@ -377,12 +411,17 @@ public class Radiance extends Monster {
             if (knockbackCooldownTimer > 1 && knockbackCooldownTimer < KNOCKBACK_COOLDOWN - 20*4 && !this.hasEffect(MobEffects.WEAKNESS)) // only attack if knockback is on cooldown AFTER 4 seconds AND does not have weakness.
                 performArmorStealAttack();
         } else if (this.state == RADIANCE_PHASE.TRANSITION_TO_RADIANCE) {
+//            updateArmorStandModel(2);
+            updateItemDisplayModel(2);
             performSkyTransition();
             AttributeInstance scaleAttribute = this.getAttribute(Attributes.SCALE);
             if (scaleAttribute != null) {
                 scaleAttribute.setBaseValue(5); // changes size to 5x what it was
             } // why does it call this every tick? idk man
         } else if (this.state == RADIANCE_PHASE.ARENA_BUILDING_2) {
+//            updateArmorStandModel(2);
+            updateItemDisplayModel(2);
+
             if (arenaBuilder2 == null)
                 arenaBuilder2 = new SpiralStructureBuilder(getServer().overworld(),new BlockPos(getBlockX()+1+4-6,230-35,getBlockZ()+1-3-6),"/arena2.schem",600); // 30 second building
             if (arenaBuilder2.tick()) {
@@ -391,6 +430,9 @@ public class Radiance extends Monster {
 
             this.moveTo(this.getX(), 230-9, this.getZ());
         } else if (this.state == RADIANCE_PHASE.RADIANCE) {
+//            updateArmorStandModel(2);
+            updateItemDisplayModel(2);
+
             performLightBeamAttack();
 
             performOrbitalLightAttack();
@@ -407,6 +449,125 @@ public class Radiance extends Monster {
 
         // Update boss bar
         updateBossBar();
+    }
+
+    private void spawnArmorStand() {
+        if (this.level().isClientSide || armorStandEntity != null) return;
+
+        // Create the armor stand entity
+        armorStandEntity = new ArmorStand(EntityType.ARMOR_STAND, this.level());
+
+        // Set initial position (same as boss)
+        armorStandEntity.setPos(this.getX(), this.getY(), this.getZ());
+
+        // Make it invisible and disable interactions
+        armorStandEntity.setInvisible(true);
+        armorStandEntity.setNoGravity(true);
+        armorStandEntity.setShowArms(false);
+        armorStandEntity.setNoBasePlate(true);
+
+        // Create the potion item with initial model data
+        ItemStack potionItem = new ItemStack(Items.POTION);
+        potionItem.set(DataComponents.CUSTOM_MODEL_DATA, new CustomModelData(currentModelData));
+        potionItem.set(DataComponents.POTION_CONTENTS, new PotionContents(
+                Optional.empty(),
+                Optional.of(16711680), // Red color
+                List.of()
+        ));
+
+        // Set the item in the armor stand's helmet slot for visibility
+        armorStandEntity.setItemSlot(EquipmentSlot.HEAD, potionItem);
+
+        // Add as passenger
+        armorStandEntity.startRiding(this);
+
+        // Spawn in world
+        this.level().addFreshEntity(armorStandEntity);
+    }
+
+    // Add this method to update the armor stand model
+    private void updateArmorStandModel(int newModelData) {
+        if (armorStandEntity == null || currentModelData == newModelData) return;
+
+        currentModelData = newModelData;
+
+        // Create new item stack with updated model data
+        ItemStack potionItem = new ItemStack(Items.POTION);
+        potionItem.set(DataComponents.CUSTOM_MODEL_DATA, new CustomModelData(currentModelData));
+        potionItem.set(DataComponents.POTION_CONTENTS, new PotionContents(
+                Optional.empty(),
+                Optional.of(16711680), // Red color
+                List.of()
+        ));
+
+        // Update the armor stand's helmet
+        armorStandEntity.setItemSlot(EquipmentSlot.HEAD, potionItem);
+    }
+
+    private void spawnItemDisplay() {
+        if (this.level().isClientSide || itemDisplayEntity != null) return;
+
+        // Create the item display entity
+        itemDisplayEntity = new Display.ItemDisplay(EntityType.ITEM_DISPLAY, this.level());
+
+        // Set initial position (same as boss)
+        itemDisplayEntity.setPos(this.getX(), this.getY(), this.getZ());
+
+        // Configure item display properties
+        itemDisplayEntity.setNoGravity(true);
+
+        // Set the item via NBT data (equivalent to the /data modify command)
+        CompoundTag itemNBT = new CompoundTag();
+        itemNBT.putString("id", "minecraft:potion");
+        itemNBT.putInt("count", 1);
+
+        // Add components
+        CompoundTag components = new CompoundTag();
+        components.putInt("minecraft:custom_model_data", currentModelData);
+
+        CompoundTag potionContents = new CompoundTag();
+        potionContents.putInt("custom_color", 16711680); // Red color
+        components.put("minecraft:potion_contents", potionContents);
+
+        itemNBT.put("components", components);
+
+        // Set the item data directly in the entity's NBT
+        CompoundTag entityData = new CompoundTag();
+        entityData.put("item", itemNBT);
+        itemDisplayEntity.load(entityData);
+
+        // Add as passenger
+        itemDisplayEntity.startRiding(this);
+
+        // Spawn in world
+        this.level().addFreshEntity(itemDisplayEntity);
+    }
+
+    // Update method for item display
+    private void updateItemDisplayModel(int newModelData) {
+        if (itemDisplayEntity == null || currentModelData == newModelData) return;
+
+        currentModelData = newModelData;
+
+        // Create updated item NBT
+        CompoundTag itemNBT = new CompoundTag();
+        itemNBT.putString("id", "minecraft:potion");
+        itemNBT.putInt("count", 1);
+
+        // Add components with new model data
+        CompoundTag components = new CompoundTag();
+        components.putInt("minecraft:custom_model_data", newModelData);
+
+        CompoundTag potionContents = new CompoundTag();
+        potionContents.putInt("custom_color", 16711680); // Red color
+        components.put("minecraft:potion_contents", potionContents);
+
+        itemNBT.put("components", components);
+
+        // Update the entity's item data
+        CompoundTag entityData = itemDisplayEntity.saveWithoutId(new CompoundTag());
+        entityData.put("item", itemNBT);
+        itemDisplayEntity.load(entityData);
     }
 
     private void performProximitySlamAttack() {
